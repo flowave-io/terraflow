@@ -37,6 +37,12 @@ func main() {
 		os.Exit(0)
 	}
 
+	if args[0] == "console" {
+		// defer to the CLI console handler
+		runConsoleCommand(args[1:])
+		os.Exit(0)
+	}
+
 	fmt.Fprintln(os.Stderr, "Unknown command: ", args[0])
 	printHelp()
 	os.Exit(1)
