@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/flowave-io/terraflow/internal/cli"
 )
 
 const version = "0.1.0"
@@ -39,7 +41,7 @@ func main() {
 
 	if args[0] == "console" {
 		// defer to the CLI console handler
-		runConsoleCommand(args[1:])
+		cli.RunConsoleCommand(args[1:])
 		os.Exit(0)
 	}
 

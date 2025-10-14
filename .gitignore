@@ -29,6 +29,10 @@ go.work.sum
 
 # Editor/IDE
 .idea/
-.cursor
+.cursor/
 
 bin
+.terraform
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl

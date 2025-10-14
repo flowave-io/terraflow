@@ -9,7 +9,7 @@ import (
 	"github.com/flowave-io/terraflow/internal/terraform"
 )
 
-func runConsoleCommand(args []string) {
+func RunConsoleCommand(args []string) {
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		printConsoleHelp()
 		os.Exit(0)
