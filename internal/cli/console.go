@@ -15,18 +15,17 @@ func RunConsoleCommand(args []string) {
 		os.Exit(0)
 	}
 
-	log.Println("Starting terraflow console (live TF context: .tf/.tfvars changes auto-refresh console)")
+	log.Println("Starting terraflow console (TAB completion, history; auto-refresh on .tf/.tfvars)")
 	refreshCh := make(chan struct{}, 1)
 	session := terraform.StartConsoleSession()
+	idx, err := terraform.BuildSymbolIndex(".")
+	if err != nil {
+		log.Println("[warn] building symbol index:", err)
+		idx = &terraform.SymbolIndex{}
+	}
 	log.Println("Terraform console started.")
 	monitor.WatchTerraformFilesNotifying(".", refreshCh)
-
-	for {
-		<-refreshCh
-		log.Println("Configuration change detected (.tf/.tfvars) – refreshing terraform console...")
-		session.Restart()
-		log.Println("Terraform console refreshed. Continue working.")
-	}
+	RunREPL(session, idx, refreshCh)
 }
 
 func printConsoleHelp() {
