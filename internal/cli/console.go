@@ -15,17 +15,20 @@ func RunConsoleCommand(args []string) {
 		os.Exit(0)
 	}
 
+	log.Println("Starting terraflow console (live TF context: .tf/.tfvars changes auto-refresh console)")
 	refreshCh := make(chan struct{}, 1)
 	session := terraform.StartConsoleSession()
+	log.Println("Terraform console started.")
 	monitor.WatchTerraformFilesNotifying(".", refreshCh)
 
 	for {
 		<-refreshCh
-		log.Println("Refreshing terraform console due to .tf or .tfvars file change.")
+		log.Println("Configuration change detected (.tf/.tfvars) – refreshing terraform console...")
 		session.Restart()
+		log.Println("Terraform console refreshed. Continue working.")
 	}
 }
 
 func printConsoleHelp() {
-	fmt.Println("terraflow console: Opens a Terraform console with live automatic updates when .tf/.tfvars files change.\nThis command will listen for Terraform file changes and update variables/resources in-place, seamlessly.\nUsage: terraflow console")
+	fmt.Println(`terraflow console: Live-updating Terraform console\n\nStarts an interactive 'terraform console' that seamlessly updates when .tf/.tfvars files change.\nNo need to restart manually: edit your Terraform files and context is auto-reloaded for you.\n\nTypical usage:\n  terraflow console\n\nExample walkthrough (see test/README.md for test workflow):\n  1. Run 'terraflow console' in a directory with your .tf files.\n  2. At the prompt, try evaluating variables/expressions.\n  3. Edit any .tf or .tfvars file: changes are live—your next expression sees updated context.\n\nSupported files: *.tf, *.tfvars (recursive in subdirs).\n\nFor more, see test/fixtures/ and README.md for sample scenarios.\n`)
 }
