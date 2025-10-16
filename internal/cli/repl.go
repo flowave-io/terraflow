@@ -12,7 +12,8 @@ import (
 
 // RunREPL starts the interactive console loop with history and autocompletion.
 // Uses raw TTY on Unix to capture TAB and arrows; gracefully degrades otherwise.
-func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, refreshCh <-chan struct{}) {
+// scratchDir is the working directory used by terraform console (e.g., .terraflow).
+func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, refreshCh <-chan struct{}, scratchDir string) {
 	// Setup persistent history file at project root
 	cwd, _ := os.Getwd()
 	historyPath := filepath.Join(cwd, ".terraflow_history")
@@ -81,6 +82,12 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	go func() {
 		for range refreshCh {
 			pendingRefresh = true
+			// Sync project files to scratch, ensure local backend, and re-init
+			if cwd != "" && scratchDir != "" {
+				_ = terraform.SyncToScratch(cwd, scratchDir)
+				_ = terraform.WriteLocalBackendFile(scratchDir)
+				_ = terraform.InitTerraformInDir(scratchDir)
+			}
 			// Restart console and rebuild index in the background
 			session.Restart()
 			if newIdx, err := terraform.BuildSymbolIndex("."); err == nil {

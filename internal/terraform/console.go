@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -11,13 +12,17 @@ import (
 )
 
 type ConsoleSession struct {
-	cmd     *exec.Cmd
-	mu      sync.Mutex
-	running bool
+	cmd       *exec.Cmd
+	mu        sync.Mutex
+	running   bool
+	statePath string
+	workDir   string
 }
 
-// StartConsoleSession creates a new session and starts the terraform console process
-func StartConsoleSession() *ConsoleSession { return &ConsoleSession{} }
+// StartConsoleSession creates a new session and records an optional working directory and state path to use with terraform console.
+func StartConsoleSession(workDir, statePath string) *ConsoleSession {
+	return &ConsoleSession{statePath: statePath, workDir: workDir}
+}
 
 // Restart stops any running console and starts a new one, connecting stdio
 func (s *ConsoleSession) Restart() { /* no-op with ephemeral evaluation */ }
@@ -39,7 +44,16 @@ func (s *ConsoleSession) Evaluate(line string, timeout time.Duration) (string, e
 	// Run a short-lived terraform console and pass the expression via stdin
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "terraform", "console")
+	args := []string{"console"}
+	if sp := s.statePath; sp != "" {
+		if fi, err := os.Stat(sp); err == nil && !fi.IsDir() {
+			args = append(args, "-state", sp)
+		}
+	}
+	cmd := exec.CommandContext(ctx, "terraform", args...)
+	if s.workDir != "" {
+		cmd.Dir = s.workDir
+	}
 	var out bytes.Buffer
 	var errBuf bytes.Buffer
 	cmd.Stdin = strings.NewReader(line + "\n")
