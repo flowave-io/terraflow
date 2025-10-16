@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,6 +13,20 @@ import (
 // RunREPL starts the interactive console loop with history and autocompletion.
 // Uses raw TTY on Unix to capture TAB and arrows; gracefully degrades otherwise.
 func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, refreshCh <-chan struct{}) {
+	// Setup persistent history file at project root
+	cwd, _ := os.Getwd()
+	historyPath := filepath.Join(cwd, ".terraflow_history")
+	// Preload history if exists
+	if b, err := os.ReadFile(historyPath); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			ln = strings.TrimRight(ln, "\r")
+			if strings.TrimSpace(ln) == "" {
+				continue
+			}
+			// loaded into in-memory history before TTY starts
+			// history slice is defined below; we will append after initialization
+		}
+	}
 	tty, restore, _ := acquireTTY()
 	if restore != nil {
 		defer restore()
@@ -24,6 +39,21 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	buf := []rune{}
 	cursor := 0
 	history := []string{}
+	// Re-read file now and append to history (after slice is created)
+	if b, err := os.ReadFile(historyPath); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			ln = strings.TrimRight(ln, "\r")
+			if strings.TrimSpace(ln) == "" {
+				continue
+			}
+			history = append(history, ln)
+		}
+	}
+	// Open file for appending executed commands
+	historyFile, _ := os.OpenFile(historyPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if historyFile != nil {
+		defer historyFile.Close()
+	}
 	histIdx := -1 // -1 means not navigating
 	pendingRefresh := false
 
@@ -111,6 +141,10 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 					os.Stderr.WriteString("error: " + err.Error() + "\n")
 				} else if strings.TrimSpace(out) != "" {
 					os.Stdout.WriteString(out + "\n")
+				}
+				// Persist command into history file
+				if historyFile != nil {
+					_, _ = historyFile.WriteString(line + "\n")
 				}
 			}
 			buf = buf[:0]
