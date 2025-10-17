@@ -60,6 +60,8 @@ func SyncToScratch(srcDir, scratchDir string) error {
 }
 
 // WriteLocalBackendFile writes a backend.tf file configuring the local backend.
+// WriteLocalBackendFile is deprecated for console flow that relies on -state flag.
+// Keeping for potential future use; not called by console anymore.
 func WriteLocalBackendFile(scratchDir string) error {
 	content := "terraform {\n  backend \"local\" {\n    path = \"terraform.tfstate\"\n  }\n}\n"
 	backendPath := filepath.Join(scratchDir, "backend.tf")

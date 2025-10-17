@@ -26,24 +26,19 @@ func RunConsoleCommand(args []string) {
 	scratchDir := filepath.Join(cwd, ".terraflow")
 	statePath := filepath.Join(scratchDir, "terraform.tfstate")
 
-	// Prepare scratch workspace with local backend
+	// Optional: pull remote state into the scratch state file BEFORE init
+	if *pullRemoteState {
+		if err := pullRemoteStateOnce(statePath); err != nil {
+			log.Printf("[warn] unable to pull remote state: %v\n", err)
+		}
+	}
+
+	// Prepare scratch workspace
 	if err := terraform.SyncToScratch(cwd, scratchDir); err != nil {
 		log.Printf("[warn] sync to scratch: %v\n", err)
 	}
-	if err := terraform.WriteLocalBackendFile(scratchDir); err != nil {
-		log.Printf("[warn] write local backend: %v\n", err)
-	}
 	if err := terraform.InitTerraformInDir(scratchDir); err != nil {
 		log.Printf("[warn] terraform init in scratch: %v\n", err)
-	}
-
-	// Optional: pull remote state once into the scratch state file
-	if *pullRemoteState {
-		if _, err := os.Stat(statePath); os.IsNotExist(err) {
-			if err := pullRemoteStateOnce(statePath); err != nil {
-				log.Printf("[warn] unable to pull remote state: %v\n", err)
-			}
-		}
 	}
 
 	refreshCh := make(chan struct{}, 1)
@@ -59,7 +54,7 @@ func RunConsoleCommand(args []string) {
 }
 
 func printConsoleHelp() {
-	fmt.Println(`terraflow console: Live-updating Terraform console
+	fmt.Print(`terraflow console: Live-updating Terraform console
 
 Starts an interactive 'terraform console' that seamlessly updates when .tf/.tfvars files change.
 No need to restart manually: edit your Terraform files and context is auto-reloaded for you.

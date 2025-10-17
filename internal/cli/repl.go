@@ -82,10 +82,9 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	go func() {
 		for range refreshCh {
 			pendingRefresh = true
-			// Sync project files to scratch, ensure local backend, and re-init
+			// Sync project files to scratch and re-init (no backend file)
 			if cwd != "" && scratchDir != "" {
 				_ = terraform.SyncToScratch(cwd, scratchDir)
-				_ = terraform.WriteLocalBackendFile(scratchDir)
 				_ = terraform.InitTerraformInDir(scratchDir)
 			}
 			// Restart console and rebuild index in the background
