@@ -14,9 +14,9 @@ import (
 // Uses raw TTY on Unix to capture TAB and arrows; gracefully degrades otherwise.
 // scratchDir is the working directory used by terraform console (e.g., .terraflow).
 func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, refreshCh <-chan struct{}, scratchDir string) {
-	// Setup persistent history file at project root
+	// Setup persistent history file under scratch directory
 	cwd, _ := os.Getwd()
-	historyPath := filepath.Join(cwd, ".terraflow_history")
+	historyPath := filepath.Join(scratchDir, ".terraflow_history")
 	// Preload history if exists
 	if b, err := os.ReadFile(historyPath); err == nil {
 		for _, ln := range strings.Split(string(b), "\n") {
