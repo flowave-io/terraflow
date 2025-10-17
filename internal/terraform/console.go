@@ -37,10 +37,11 @@ func (s *ConsoleSession) Stop() {
 	}
 }
 
-// Evaluate sends a line to the terraform console and reads output until a
-// sentinel line is observed or a timeout occurs. It returns combined stdout
-// lines (stderr is appended with a prefix) and any error.
-func (s *ConsoleSession) Evaluate(line string, timeout time.Duration) (string, error) {
+// Evaluate runs a short-lived `terraform console`, writes the provided line to stdin,
+// and returns the raw stdout and stderr from Terraform. No trimming is applied.
+// On timeout, an error is returned; on other non-zero exits, stdout/stderr are
+// returned and error is nil so the caller can mirror Terraform output faithfully.
+func (s *ConsoleSession) Evaluate(line string, timeout time.Duration) (string, string, error) {
 	// Run a short-lived terraform console and pass the expression via stdin
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -61,16 +62,16 @@ func (s *ConsoleSession) Evaluate(line string, timeout time.Duration) (string, e
 	cmd.Stderr = &errBuf
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		return "", errors.New("terraform console evaluation timed out")
+		return "", "", errors.New("terraform console evaluation timed out")
 	}
 	if err != nil {
-		// Return stderr text if available to show evaluation errors
-		if errBuf.Len() > 0 {
-			return strings.TrimRight(errBuf.String(), "\r\n"), nil
+		// If Terraform produced output on either stream, return it and suppress the error
+		if out.Len() > 0 || errBuf.Len() > 0 {
+			return out.String(), errBuf.String(), nil
 		}
-		return "", err
+		return "", "", err
 	}
-	return strings.TrimRight(out.String(), "\r\n"), nil
+	return out.String(), errBuf.String(), nil
 }
 
 // Interrupt sends an interrupt signal to the terraform console process (best-effort).

@@ -77,6 +77,30 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	// For Ctrl+C handling
 	var lastCtrlC time.Time
 
+	// Ensure newlines render correctly in raw TTY: map lone \n to \r\n
+	normalizeTTYNewlines := func(s string) string {
+		if s == "" {
+			return s
+		}
+		var b strings.Builder
+		b.Grow(len(s) + len(s)/8)
+		prev := byte(0)
+		for i := 0; i < len(s); i++ {
+			ch := s[i]
+			if ch == '\n' {
+				if prev != '\r' {
+					b.WriteString("\r\n")
+				} else {
+					b.WriteByte('\n')
+				}
+			} else {
+				b.WriteByte(ch)
+			}
+			prev = ch
+		}
+		return b.String()
+	}
+
 	// Non-blocking refresh watcher
 	refreshNotify := make(chan struct{}, 1)
 	go func() {
@@ -92,6 +116,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			if newIdx, err := terraform.BuildSymbolIndex("."); err == nil {
 				index = newIdx
 			}
+			// No user-facing banner; just note internally that a refresh occurred
 			refreshNotify <- struct{}{}
 		}
 	}()
@@ -101,7 +126,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	for {
 		select {
 		case <-refreshNotify:
-			os.Stdout.WriteString("\r\n[refreshed terraform console]\r\n")
+			// Re-render prompt without spamming the console
 			render()
 			continue
 		default:
@@ -140,13 +165,27 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				}
 				history = append(history, line)
 				histIdx = -1
-				if out, err := session.Evaluate(line, 5*time.Second); err != nil {
-					if strings.TrimSpace(out) != "" {
-						os.Stderr.WriteString(out + "\n")
+				stdout, stderr, evalErr := session.Evaluate(line, 5*time.Second)
+				if stdout != "" {
+					os.Stdout.WriteString(normalizeTTYNewlines(stdout))
+					if !strings.HasSuffix(stdout, "\n") && !strings.HasSuffix(stdout, "\r\n") {
+						os.Stdout.WriteString("\r\n")
 					}
-					os.Stderr.WriteString("error: " + err.Error() + "\n")
-				} else if strings.TrimSpace(out) != "" {
-					os.Stdout.WriteString(out + "\n")
+				}
+				if stderr != "" {
+					os.Stderr.WriteString(normalizeTTYNewlines(stderr))
+					if !strings.HasSuffix(stderr, "\n") && !strings.HasSuffix(stderr, "\r\n") {
+						os.Stderr.WriteString("\r\n")
+					}
+				}
+				if evalErr != nil {
+					msg := evalErr.Error()
+					if msg != "" {
+						os.Stderr.WriteString(normalizeTTYNewlines(msg))
+						if !strings.HasSuffix(msg, "\n") && !strings.HasSuffix(msg, "\r\n") {
+							os.Stderr.WriteString("\r\n")
+						}
+					}
 				}
 				// Persist command into history file
 				if historyFile != nil {
@@ -156,7 +195,6 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			buf = buf[:0]
 			cursor = 0
 			if pendingRefresh {
-				os.Stdout.WriteString("[refreshed terraform console]\n")
 				pendingRefresh = false
 			}
 			render()
