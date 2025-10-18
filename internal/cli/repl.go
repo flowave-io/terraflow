@@ -163,7 +163,15 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				if line == "exit" || line == "quit" {
 					return
 				}
-				history = append(history, line)
+				// Only record if not a consecutive duplicate
+				if len(history) == 0 || history[len(history)-1] != line {
+					history = append(history, line)
+					// Persist command into history file
+					if historyFile != nil {
+						_, _ = historyFile.WriteString(line + "\n")
+					}
+				}
+				// Always reset navigation
 				histIdx = -1
 				stdout, stderr, evalErr := session.Evaluate(line, 5*time.Second)
 				if stdout != "" {
@@ -186,10 +194,6 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 							os.Stderr.WriteString("\r\n")
 						}
 					}
-				}
-				// Persist command into history file
-				if historyFile != nil {
-					_, _ = historyFile.WriteString(line + "\n")
 				}
 			}
 			buf = buf[:0]
