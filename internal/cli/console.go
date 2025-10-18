@@ -3,6 +3,7 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -28,7 +29,7 @@ func RunConsoleCommand(args []string) {
 
 	// Optional: pull remote state into the scratch state file BEFORE init
 	if *pullRemoteState {
-		if err := pullRemoteStateOnce(statePath); err != nil {
+		if err := pullRemoteStateOnce(cwd, statePath); err != nil {
 			log.Printf("[warn] unable to pull remote state: %v\n", err)
 		}
 	}
@@ -73,15 +74,30 @@ For more, see test/fixtures/ and README.md for sample scenarios.
 `)
 }
 
-// pullRemoteStateOnce pulls remote state via `terraform state pull` and writes it to statePath.
-// It creates the parent directory with 0700 permissions and writes the state file with 0600 permissions.
-func pullRemoteStateOnce(statePath string) error {
+// pullRemoteStateOnce ensures the project at workDir is initialized and pulls remote state
+// via `terraform state pull`, writing it to statePath. Parent dir is 0700; state file 0600.
+func pullRemoteStateOnce(workDir, statePath string) error {
+	if workDir == "" {
+		wd, _ := os.Getwd()
+		workDir = wd
+	}
+	// Ensure destination directory exists
 	dir := filepath.Dir(statePath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
-	cmd := exec.Command("terraform", "state", "pull", "-no-color")
-	out, err := cmd.Output()
+	// Initialize the project so backend config is available for state pull
+	initCmd := exec.Command("terraform", "init", "-input=false", "-no-color")
+	initCmd.Dir = workDir
+	initCmd.Stdout = io.Discard
+	initCmd.Stderr = io.Discard
+	if err := initCmd.Run(); err != nil {
+		return fmt.Errorf("terraform init: %w", err)
+	}
+	// Pull remote state
+	pullCmd := exec.Command("terraform", "state", "pull", "-no-color")
+	pullCmd.Dir = workDir
+	out, err := pullCmd.Output()
 	if err != nil {
 		return fmt.Errorf("terraform state pull: %w", err)
 	}
