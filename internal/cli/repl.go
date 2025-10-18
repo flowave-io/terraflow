@@ -74,8 +74,6 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	// completion logic inlined in TAB handler
 
 	readKey := make([]byte, 3) // support ESC [ A sequences
-	// For Ctrl+C handling
-	var lastCtrlC time.Time
 
 	// Ensure newlines render correctly in raw TTY: map lone \n to \r\n
 	normalizeTTYNewlines := func(s string) string {
@@ -140,16 +138,11 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		}
 		b := readKey[0]
 		switch b {
-		case 3: // Ctrl+C
-			// First press: try to interrupt terraform console; second press within 1s exits
-			now := time.Now()
-			if now.Sub(lastCtrlC) < time.Second {
-				os.Stdout.WriteString("\r\n[exit]\r\n")
-				return
-			}
-			lastCtrlC = now
-			session.Interrupt()
-			os.Stdout.WriteString("\r\n[interrupt]\r\n")
+		case 3: // Ctrl+C — behave like Bash: clear current input and show a fresh prompt
+			os.Stdout.WriteString("\r\n")
+			buf = buf[:0]
+			cursor = 0
+			histIdx = -1
 			render()
 			continue
 		case 4: // Ctrl+D
