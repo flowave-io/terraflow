@@ -68,13 +68,66 @@ func WriteLocalBackendFile(scratchDir string) error {
 	return os.WriteFile(backendPath, []byte(content), 0o600)
 }
 
-// InitTerraformInDir runs `terraform init -reconfigure` in the given directory.
+// InitTerraformInDir mirrors the project's .terraform directory into the
+// provided directory's .terraform, excluding any terraform.tfstate file.
 func InitTerraformInDir(dir string) error {
-	cmd := exec.Command("terraform", "init", "-input=false", "-no-color", "-reconfigure")
-	cmd.Dir = dir
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run()
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get working dir: %w", err)
+	}
+	src := filepath.Join(workDir, ".terraform")
+	info, statErr := os.Stat(src)
+	if statErr != nil || !info.IsDir() {
+		// Nothing to mirror; treat as no-op
+		return nil
+	}
+	dst := filepath.Join(dir, ".terraform")
+	if remErr := os.RemoveAll(dst); remErr != nil {
+		return fmt.Errorf("remove existing scratch .terraform: %w", remErr)
+	}
+	if mkErr := os.MkdirAll(dst, info.Mode()); mkErr != nil {
+		return fmt.Errorf("create scratch .terraform: %w", mkErr)
+	}
+	walkErr := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(src, path)
+		if rel == "." {
+			return nil
+		}
+		if info.IsDir() {
+			return os.MkdirAll(filepath.Join(dst, rel), info.Mode())
+		}
+		// Skip local state file inside .terraform if present
+		if filepath.Base(path) == "terraform.tfstate" {
+			return nil
+		}
+		out := filepath.Join(dst, rel)
+		if mkDirErr := os.MkdirAll(filepath.Dir(out), info.Mode()); mkDirErr != nil {
+			return mkDirErr
+		}
+		return copyFile(path, out, info.Mode().Perm())
+	})
+	if walkErr != nil {
+		return fmt.Errorf("sync .terraform: %w", walkErr)
+	}
+	// Ensure state file is not present in destination even if created by other means
+	_ = os.Remove(filepath.Join(dst, "terraform.tfstate"))
+	// Generate provider lock file once if missing in scratch directory
+	lockPath := filepath.Join(dir, ".terraform.lock.hcl")
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		cmd := exec.Command("terraform", "providers", "lock", "-fs-mirror", ".terraform/providers")
+		cmd.Dir = dir
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("terraform providers lock: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("stat lock file: %w", err)
+	}
+	return nil
 }
 
 func hasBackendBlock(path string) bool {

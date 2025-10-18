@@ -3,7 +3,6 @@ package cli
 import (
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -87,10 +86,10 @@ func pullRemoteStateOnce(workDir, statePath string) error {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 	// Initialize the project so backend config is available for state pull
-	initCmd := exec.Command("terraform", "init", "-input=false", "-no-color")
+	initCmd := exec.Command("terraform", "init", "-input=false")
 	initCmd.Dir = workDir
-	initCmd.Stdout = io.Discard
-	initCmd.Stderr = io.Discard
+	initCmd.Stdout = os.Stdout
+	initCmd.Stderr = os.Stderr
 	if err := initCmd.Run(); err != nil {
 		return fmt.Errorf("terraform init: %w", err)
 	}
