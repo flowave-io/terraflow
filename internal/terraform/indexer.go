@@ -1,13 +1,17 @@
 package terraform
 
 import (
-	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/hashicorp/go-multierror"
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclparse"
+	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
 
 // SymbolIndex holds discovered Terraform symbols for autocompletion.
@@ -20,121 +24,36 @@ type SymbolIndex struct {
 	Outputs    []string
 }
 
-// BuildSymbolIndex walks the directory tree rooted at dir and extracts symbols
-// from .tf and .tfvars files using lightweight regex-based scanning.
+// BuildSymbolIndex loads configuration from dir using tfconfig and hcl. It
+// follows local child modules and optionally fetches remote (non-registry)
+// module sources into a cache under .terraflow/modules.
 func BuildSymbolIndex(dir string) (*SymbolIndex, error) {
 	idx := &SymbolIndex{
 		Resource:   map[string][]string{},
 		DataSource: map[string][]string{},
 	}
+	absRoot, _ := filepath.Abs(dir)
+	cacheDir := filepath.Join(absRoot, ".terraflow", "modules")
+	visited := map[string]struct{}{}
 
-	// Regex patterns for HCL blocks we care about
-	// Examples matched:
-	//   variable "name" { ... }
-	//   resource "aws_s3_bucket" "app" { ... }
-	//   data "aws_iam_policy" "readonly" { ... }
-	//   module "network" { ... }
-	//   output "url" { ... }
-	//   locals { name = "value" other = 1 }
-	reVariable := regexp.MustCompile(`^\s*variable\s+"([^"]+)"`)
-	reResource := regexp.MustCompile(`^\s*resource\s+"([^"]+)"\s+"([^"]+)"`)
-	reData := regexp.MustCompile(`^\s*data\s+"([^"]+)"\s+"([^"]+)"`)
-	reModule := regexp.MustCompile(`^\s*module\s+"([^"]+)"`)
-	reOutput := regexp.MustCompile(`^\s*output\s+"([^"]+)"`)
-	reLocalsStart := regexp.MustCompile(`^\s*locals\s*{`)
-	reLocalEntry := regexp.MustCompile(`^\s*([A-Za-z0-9_]+)\s*=`)
-
-	// Track whether we are inside a locals { } block and its brace depth
-	type localsState struct {
-		inBlock bool
-		depth   int
+	var allErr error
+	if err := indexModuleRecursive(context.Background(), absRoot, absRoot, cacheDir, idx, visited); err != nil {
+		allErr = multierror.Append(allErr, err)
 	}
-	var locState localsState
 
-	root := filepath.Clean(dir)
-	walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() {
-			// skip hidden/vendor-like directories EXCEPT the root itself
-			if filepath.Clean(path) == root {
+	// Optionally hydrate from .terraform/modules if present (covers registry modules)
+	modDir := filepath.Join(absRoot, ".terraform", "modules")
+	if fi, err := os.Stat(modDir); err == nil && fi.IsDir() {
+		_ = filepath.Walk(modDir, func(p string, info os.FileInfo, err error) error {
+			if err != nil || !info.IsDir() {
 				return nil
 			}
-			base := filepath.Base(path)
-			if strings.HasPrefix(base, ".") || base == "vendor" || base == "node_modules" || base == ".git" || base == ".terraform" {
-				return filepath.SkipDir
+			if _, seen := visited[p]; seen {
+				return nil
 			}
+			_ = indexModuleRecursive(context.Background(), p, p, cacheDir, idx, visited)
 			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".tf" && ext != ".tfvars" {
-			return nil
-		}
-		f, openErr := os.Open(path)
-		if openErr != nil {
-			return nil
-		}
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := scanner.Text()
-			// quick comment strip
-			if i := strings.Index(line, "#"); i >= 0 {
-				line = line[:i]
-			}
-			if i := strings.Index(line, "//"); i >= 0 {
-				line = line[:i]
-			}
-
-			if reLocalsStart.MatchString(line) {
-				locState.inBlock = true
-				locState.depth = 1
-				continue
-			}
-			if locState.inBlock {
-				// Count braces to know when locals block ends
-				locState.depth += strings.Count(line, "{")
-				locState.depth -= strings.Count(line, "}")
-				if m := reLocalEntry.FindStringSubmatch(line); m != nil {
-					name := m[1]
-					if name != "" {
-						idx.Locals = append(idx.Locals, name)
-					}
-				}
-				if locState.depth <= 0 {
-					locState = localsState{}
-				}
-				continue
-			}
-
-			if m := reVariable.FindStringSubmatch(line); m != nil {
-				idx.Variables = append(idx.Variables, m[1])
-				continue
-			}
-			if m := reResource.FindStringSubmatch(line); m != nil {
-				rType, rName := m[1], m[2]
-				idx.Resource[rType] = append(idx.Resource[rType], rName)
-				continue
-			}
-			if m := reData.FindStringSubmatch(line); m != nil {
-				dType, dName := m[1], m[2]
-				idx.DataSource[dType] = append(idx.DataSource[dType], dName)
-				continue
-			}
-			if m := reModule.FindStringSubmatch(line); m != nil {
-				idx.Modules = append(idx.Modules, m[1])
-				continue
-			}
-			if m := reOutput.FindStringSubmatch(line); m != nil {
-				idx.Outputs = append(idx.Outputs, m[1])
-				continue
-			}
-		}
-		return nil
-	})
-	if walkErr != nil {
-		return nil, fmt.Errorf("walk: %w", walkErr)
+		})
 	}
 
 	// Normalize: sort and dedupe
@@ -148,7 +67,134 @@ func BuildSymbolIndex(dir string) (*SymbolIndex, error) {
 	for k, v := range idx.DataSource {
 		idx.DataSource[k] = uniqueSorted(v)
 	}
-	return idx, nil
+
+	// Return partial index and a combined error if present
+	return idx, allErr
+}
+
+func indexModuleRecursive(ctx context.Context, rootDir, moduleDir, cacheDir string, idx *SymbolIndex, visited map[string]struct{}) error {
+	abs, _ := filepath.Abs(moduleDir)
+	if _, ok := visited[abs]; ok {
+		return nil
+	}
+	visited[abs] = struct{}{}
+
+	mod, diags := tfconfig.LoadModule(abs)
+	var resultErr error
+	if diags != nil && diags.HasErrors() {
+		resultErr = multierror.Append(resultErr, fmt.Errorf("%s: %s", abs, diags.Error()))
+	}
+	if mod == nil {
+		return resultErr
+	}
+
+	// Variables
+	for name := range mod.Variables {
+		idx.Variables = append(idx.Variables, name)
+	}
+	// Outputs
+	for name := range mod.Outputs {
+		idx.Outputs = append(idx.Outputs, name)
+	}
+	// Resources
+	for _, r := range mod.ManagedResources {
+		if r == nil || r.Type == "" || r.Name == "" {
+			continue
+		}
+		idx.Resource[r.Type] = append(idx.Resource[r.Type], r.Name)
+	}
+	// Data sources
+	for _, d := range mod.DataResources {
+		if d == nil || d.Type == "" || d.Name == "" {
+			continue
+		}
+		idx.DataSource[d.Type] = append(idx.DataSource[d.Type], d.Name)
+	}
+	// Locals via HCL parse
+	locals, lerr := parseLocals(abs)
+	if lerr != nil {
+		resultErr = multierror.Append(resultErr, lerr)
+	}
+	idx.Locals = append(idx.Locals, locals...)
+
+	// Modules
+	for name, call := range mod.ModuleCalls {
+		if name != "" {
+			idx.Modules = append(idx.Modules, name)
+		}
+		if call == nil || strings.TrimSpace(call.Source) == "" {
+			continue
+		}
+		src := call.Source
+		// Local path
+		if isLikelyLocalPath(src) {
+			child := src
+			if !filepath.IsAbs(child) {
+				child = filepath.Join(abs, child)
+			}
+			_ = indexModuleRecursive(ctx, rootDir, child, cacheDir, idx, visited)
+			continue
+		}
+		// Registry addresses are handled via .terraform/modules hydration
+		if isRegistryAddress(src) {
+			continue
+		}
+		// Remote via go-getter
+		if local, err := ResolveOrFetchModuleSource(ctx, src, cacheDir); err == nil && local != "" {
+			_ = indexModuleRecursive(ctx, rootDir, local, cacheDir, idx, visited)
+		} else if err != nil {
+			resultErr = multierror.Append(resultErr, fmt.Errorf("module %q: %v", name, err))
+		}
+	}
+	return resultErr
+}
+
+func parseLocals(dir string) ([]string, error) {
+	parser := hclparse.NewParser()
+	var out []string
+	var allErr error
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			// skip heavy/internal dirs
+			if info != nil && info.IsDir() {
+				base := filepath.Base(p)
+				if base == ".terraform" || base == ".terraflow" || strings.HasPrefix(base, ".git") || base == "vendor" || base == "node_modules" {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if strings.HasPrefix(info.Name(), ".") {
+			return nil
+		}
+		if strings.ToLower(filepath.Ext(p)) != ".tf" {
+			return nil
+		}
+		f, diags := parser.ParseHCLFile(p)
+		if diags != nil && diags.HasErrors() {
+			allErr = multierror.Append(allErr, fmt.Errorf("%s: %s", p, diags.Error()))
+			return nil
+		}
+		if f == nil {
+			return nil
+		}
+		schema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "locals"}}}
+		content, _, _ := f.Body.PartialContent(schema)
+		for _, b := range content.Blocks {
+			if b.Type != "locals" {
+				continue
+			}
+			attrs, _ := b.Body.JustAttributes()
+			for name := range attrs {
+				out = append(out, name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		allErr = multierror.Append(allErr, err)
+	}
+	return out, allErr
 }
 
 func uniqueSorted(in []string) []string {

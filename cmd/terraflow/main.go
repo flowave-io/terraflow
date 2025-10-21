@@ -6,12 +6,13 @@ import (
 	"os"
 
 	"github.com/flowave-io/terraflow/internal/cli"
+	"github.com/flowave-io/terraflow/internal/terraform"
 )
 
 const version = "0.1.0"
 
 func printHelp() {
-	fmt.Println(`Terraflow: Real-time development tool for Terraform and OpenTofu
+	fmt.Print(`Terraflow: Real-time development tool for Terraform and OpenTofu
 
 Usage:
   terraflow [command] [options]
@@ -40,6 +41,8 @@ func main() {
 	}
 
 	if args[0] == "console" {
+		// Warn-only Terraform version check before starting console
+		terraform.CheckVersionWarn()
 		// defer to the CLI console handler
 		cli.RunConsoleCommand(args[1:])
 		os.Exit(0)

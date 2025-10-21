@@ -34,7 +34,7 @@ func RunConsoleCommand(args []string) {
 	}
 
 	// Prepare scratch workspace
-	if err := terraform.SyncToScratch(cwd, scratchDir); err != nil {
+	if _, _, err := terraform.SyncToScratch(cwd, scratchDir); err != nil {
 		log.Printf("[warn] sync to scratch: %v\n", err)
 	}
 	if err := terraform.InitTerraformInDir(scratchDir); err != nil {
@@ -43,7 +43,7 @@ func RunConsoleCommand(args []string) {
 
 	refreshCh := make(chan struct{}, 1)
 	session := terraform.StartConsoleSession(scratchDir, statePath)
-	idx, err := terraform.BuildSymbolIndex(".")
+	idx, err := terraform.BuildSymbolIndex(scratchDir)
 	if err != nil {
 		log.Println("[warn] building symbol index:", err)
 		idx = &terraform.SymbolIndex{}

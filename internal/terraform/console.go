@@ -12,54 +12,84 @@ import (
 )
 
 type ConsoleSession struct {
-	cmd       *exec.Cmd
-	mu        sync.Mutex
-	running   bool
 	statePath string
 	workDir   string
+
+	// precomputed execution details to avoid per-eval overhead
+	binPath string
+	args    []string
+	env     []string
 }
 
-// StartConsoleSession creates a new session and records an optional working directory and state path to use with terraform console.
+var bufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// StartConsoleSession creates a new ephemeral-eval session that records working directory and state path.
 func StartConsoleSession(workDir, statePath string) *ConsoleSession {
-	return &ConsoleSession{statePath: statePath, workDir: workDir}
-}
-
-// Restart stops any running console and starts a new one, connecting stdio
-func (s *ConsoleSession) Restart() { /* no-op with ephemeral evaluation */ }
-
-func (s *ConsoleSession) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cmd != nil && s.running {
-		s.cmd.Process.Kill()
-		s.cmd.Wait()
-		s.running = false
+	s := &ConsoleSession{statePath: statePath, workDir: workDir}
+	// Compute binary path once
+	if p, err := exec.LookPath("terraform"); err == nil {
+		s.binPath = p
+	} else {
+		s.binPath = "terraform"
 	}
+	// Precompute args
+	s.args = []string{"console", "-no-color"}
+	if sp := s.statePath; sp != "" {
+		if fi, err := os.Stat(sp); err == nil && !fi.IsDir() {
+			s.args = append(s.args, "-state", sp)
+		}
+	}
+	// Precompute env
+	env := append([]string{}, os.Environ()...)
+	env = append(env, "TF_IN_AUTOMATION=1")
+	// Avoid accidental pagers or prompts
+	env = append(env, "PAGER=")
+	s.env = env
+	return s
 }
+
+// Restart is a no-op for ephemeral evaluations.
+func (s *ConsoleSession) Restart() {}
+
+// Stop is a no-op for ephemeral evaluations.
+func (s *ConsoleSession) Stop() {}
+
+// Interrupt is a no-op for ephemeral evaluations.
+func (s *ConsoleSession) Interrupt() {}
 
 // Evaluate runs a short-lived `terraform console`, writes the provided line to stdin,
 // and returns the raw stdout and stderr from Terraform. No trimming is applied.
 // On timeout, an error is returned; on other non-zero exits, stdout/stderr are
 // returned and error is nil so the caller can mirror Terraform output faithfully.
 func (s *ConsoleSession) Evaluate(line string, timeout time.Duration) (string, string, error) {
-	// Run a short-lived terraform console and pass the expression via stdin
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	args := []string{"console"}
-	if sp := s.statePath; sp != "" {
-		if fi, err := os.Stat(sp); err == nil && !fi.IsDir() {
-			args = append(args, "-state", sp)
-		}
+
+	bin := s.binPath
+	if bin == "" {
+		bin = "terraform"
 	}
-	cmd := exec.CommandContext(ctx, "terraform", args...)
+	cmd := exec.CommandContext(ctx, bin, s.args...)
 	if s.workDir != "" {
 		cmd.Dir = s.workDir
 	}
-	var out bytes.Buffer
-	var errBuf bytes.Buffer
+	// Deterministic, non-interactive environment
+	if len(s.env) > 0 {
+		cmd.Env = s.env
+	} else {
+		cmd.Env = os.Environ()
+	}
+
+	out := bufferPool.Get().(*bytes.Buffer)
+	errBuf := bufferPool.Get().(*bytes.Buffer)
+	out.Reset()
+	errBuf.Reset()
+	defer bufferPool.Put(out)
+	defer bufferPool.Put(errBuf)
+
 	cmd.Stdin = strings.NewReader(line + "\n")
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
+	cmd.Stdout = out
+	cmd.Stderr = errBuf
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", "", errors.New("terraform console evaluation timed out")
@@ -67,12 +97,13 @@ func (s *ConsoleSession) Evaluate(line string, timeout time.Duration) (string, s
 	if err != nil {
 		// If Terraform produced output on either stream, return it and suppress the error
 		if out.Len() > 0 || errBuf.Len() > 0 {
-			return out.String(), errBuf.String(), nil
+			sOut := out.String()
+			sErr := errBuf.String()
+			return sOut, sErr, nil
 		}
 		return "", "", err
 	}
-	return out.String(), errBuf.String(), nil
+	sOut := out.String()
+	sErr := errBuf.String()
+	return sOut, sErr, nil
 }
-
-// Interrupt sends an interrupt signal to the terraform console process (best-effort).
-func (s *ConsoleSession) Interrupt() { /* not applicable with ephemeral evaluation */ }

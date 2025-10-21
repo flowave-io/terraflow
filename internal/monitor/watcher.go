@@ -11,13 +11,26 @@ var watchExtensions = []string{".tf", ".tfvars"}
 // WatchTerraformFilesNotifying receives a channel and sends a notification on changes
 func WatchTerraformFilesNotifying(dir string, refreshCh chan<- struct{}) {
 	last := map[string]time.Time{}
+	// Debounce bursts of edits within this interval
+	const debounce = 500 * time.Millisecond
+	var pending bool
+	var lastFire time.Time
 	go func() {
-		for {
-			changed := pollTerraformFiles(dir, last)
-			if changed {
-				refreshCh <- struct{}{}
+		ticker := time.NewTicker(300 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			if pollTerraformFiles(dir, last) {
+				pending = true
 			}
-			time.Sleep(1 * time.Second)
+			if pending && time.Since(lastFire) >= debounce {
+				select {
+				case refreshCh <- struct{}{}:
+					lastFire = time.Now()
+					pending = false
+				default:
+					// channel full, skip
+				}
+			}
 		}
 	}()
 }

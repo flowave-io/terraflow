@@ -104,15 +104,26 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	go func() {
 		for range refreshCh {
 			pendingRefresh = true
+			changedTFOnly := false
 			// Sync project files to scratch and re-init (no backend file)
 			if cwd != "" && scratchDir != "" {
-				_ = terraform.SyncToScratch(cwd, scratchDir)
-				_ = terraform.InitTerraformInDir(scratchDir)
+				changed, changedTF, _ := terraform.SyncToScratch(cwd, scratchDir)
+				if !changed {
+					// Nothing to do
+					pendingRefresh = false
+					continue
+				}
+				// Track whether only tfvars/json changed (no .tf)
+				changedTFOnly = !changedTF
 			}
 			// Restart console and rebuild index in the background
 			session.Restart()
-			if newIdx, err := terraform.BuildSymbolIndex("."); err == nil {
-				index = newIdx
+			// Only rebuild index if structural .tf files changed; tfvars-only changes
+			// should not impact completion. This reduces refresh cost.
+			if !changedTFOnly {
+				if newIdx, err := terraform.BuildSymbolIndex(scratchDir); err == nil {
+					index = newIdx
+				}
 			}
 			// No user-facing banner; just note internally that a refresh occurred
 			refreshNotify <- struct{}{}
@@ -121,6 +132,11 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 
 	// Initial render
 	render()
+
+	// Background warm-up evaluation to prime terraform and OS caches
+	go func() {
+		_, _, _ = session.Evaluate("0", 10*time.Second)
+	}()
 	for {
 		select {
 		case <-refreshNotify:
@@ -166,7 +182,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				}
 				// Always reset navigation
 				histIdx = -1
-				stdout, stderr, evalErr := session.Evaluate(line, 5*time.Second)
+				stdout, stderr, evalErr := session.Evaluate(line, 15*time.Second)
 				if stdout != "" {
 					os.Stdout.WriteString(normalizeTTYNewlines(stdout))
 					if !strings.HasSuffix(stdout, "\n") && !strings.HasSuffix(stdout, "\r\n") {
