@@ -2,11 +2,14 @@ package terraform
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"os/exec"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/hcl/v2"
@@ -22,6 +25,9 @@ type SymbolIndex struct {
 	Resource   map[string][]string // type -> names
 	DataSource map[string][]string // type -> names
 	Outputs    []string
+	// Collected attribute keys seen in configuration for each resource/data type
+	ResourceAttrs map[string][]string // resource type -> attribute keys (from config)
+	DataAttrs     map[string][]string // data type -> attribute keys (from config)
 }
 
 // BuildSymbolIndex loads configuration from dir using tfconfig and hcl. It
@@ -29,8 +35,10 @@ type SymbolIndex struct {
 // module sources into a cache under .terraflow/modules.
 func BuildSymbolIndex(dir string) (*SymbolIndex, error) {
 	idx := &SymbolIndex{
-		Resource:   map[string][]string{},
-		DataSource: map[string][]string{},
+		Resource:      map[string][]string{},
+		DataSource:    map[string][]string{},
+		ResourceAttrs: map[string][]string{},
+		DataAttrs:     map[string][]string{},
 	}
 	absRoot, _ := filepath.Abs(dir)
 	cacheDir := filepath.Join(absRoot, ".terraflow", "modules")
@@ -56,6 +64,9 @@ func BuildSymbolIndex(dir string) (*SymbolIndex, error) {
 		})
 	}
 
+	// Augment attribute sets with provider schemas if available
+	_ = augmentAttributesFromProviderSchemas(dir, idx)
+
 	// Normalize: sort and dedupe
 	idx.Variables = uniqueSorted(idx.Variables)
 	idx.Locals = uniqueSorted(idx.Locals)
@@ -66,6 +77,12 @@ func BuildSymbolIndex(dir string) (*SymbolIndex, error) {
 	}
 	for k, v := range idx.DataSource {
 		idx.DataSource[k] = uniqueSorted(v)
+	}
+	for k, v := range idx.ResourceAttrs {
+		idx.ResourceAttrs[k] = uniqueSorted(v)
+	}
+	for k, v := range idx.DataAttrs {
+		idx.DataAttrs[k] = uniqueSorted(v)
 	}
 
 	// Return partial index and a combined error if present
@@ -110,6 +127,47 @@ func indexModuleRecursive(ctx context.Context, rootDir, moduleDir, cacheDir stri
 		}
 		idx.DataSource[d.Type] = append(idx.DataSource[d.Type], d.Name)
 	}
+	// Lightweight attribute keys collection from HCL AST (best-effort):
+	// We scan *.tf files for blocks of form resource "type" "name" { attr = ... }
+	// and collect top-level attribute keys appearing under that type. Same for data.
+	// This does not validate the provider schema; it's purely heuristic from config.
+	_ = filepath.Walk(abs, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if strings.ToLower(filepath.Ext(p)) != ".tf" {
+			return nil
+		}
+		f, diags := hclparse.NewParser().ParseHCLFile(p)
+		if diags != nil && diags.HasErrors() || f == nil {
+			return nil
+		}
+		schema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "resource"}, {Type: "data"}}}
+		content, _, _ := f.Body.PartialContent(schema)
+		for _, b := range content.Blocks {
+			switch b.Type {
+			case "resource":
+				if len(b.Labels) < 2 {
+					continue
+				}
+				rType := b.Labels[0]
+				attrs, _ := b.Body.JustAttributes()
+				for k := range attrs {
+					idx.ResourceAttrs[rType] = append(idx.ResourceAttrs[rType], k)
+				}
+			case "data":
+				if len(b.Labels) < 2 {
+					continue
+				}
+				dType := b.Labels[0]
+				attrs, _ := b.Body.JustAttributes()
+				for k := range attrs {
+					idx.DataAttrs[dType] = append(idx.DataAttrs[dType], k)
+				}
+			}
+		}
+		return nil
+	})
 	// Locals via HCL parse
 	locals, lerr := parseLocals(abs)
 	if lerr != nil {
@@ -215,6 +273,68 @@ func uniqueSorted(in []string) []string {
 	return out
 }
 
+// augmentAttributesFromProviderSchemas tries to query terraform providers for schema
+// via `terraform providers schema -json` and enrich resource/data attribute lists.
+// If the command fails, this function is a no-op.
+func augmentAttributesFromProviderSchemas(dir string, idx *SymbolIndex) error {
+	bin := "terraform"
+	cmd := exec.Command(bin, "providers", "schema", "-json")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return err
+	}
+	// Minimal struct to parse resources and datasources
+	var doc struct {
+		ProviderSchemas map[string]struct {
+			ResourceSchemas map[string]struct {
+				Block struct {
+					Attributes map[string]any `json:"attributes"`
+				} `json:"block"`
+			} `json:"resource_schemas"`
+			DataSourceSchemas map[string]struct {
+				Block struct {
+					Attributes map[string]any `json:"attributes"`
+				} `json:"block"`
+			} `json:"data_source_schemas"`
+		} `json:"provider_schemas"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		return err
+	}
+	// The keys for resources are provider-qualified like "azurerm_resource_group" in TF 1.6+ (depends).
+	// We'll merge by suffix matching against types we already know.
+	// Fill maps of type->attrs from provider schemas.
+	for _, prov := range doc.ProviderSchemas {
+		for rType, rSchema := range prov.ResourceSchemas {
+			// prefer exact key; otherwise allow suffix after last '.'
+			t := rType
+			if i := strings.LastIndex(t, "."); i >= 0 {
+				t = t[i+1:]
+			}
+			if len(rSchema.Block.Attributes) > 0 {
+				for k := range rSchema.Block.Attributes {
+					idx.ResourceAttrs[t] = append(idx.ResourceAttrs[t], k)
+				}
+			}
+		}
+		for dType, dSchema := range prov.DataSourceSchemas {
+			t := dType
+			if i := strings.LastIndex(t, "."); i >= 0 {
+				t = t[i+1:]
+			}
+			if len(dSchema.Block.Attributes) > 0 {
+				for k := range dSchema.Block.Attributes {
+					idx.DataAttrs[t] = append(idx.DataAttrs[t], k)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // CompletionCandidates generates suggestions for a given tokenized context.
 // cursorIndex is byte index in line. Returns suggestions and the range [start,end)
 // (byte offsets) of the token to replace.
@@ -268,7 +388,7 @@ func (s *SymbolIndex) CompletionCandidates(line string, cursorIndex int) (candid
 		token, lower = "data.", "data."
 	}
 
-	// Patterns: var., local., module., data., output., <type>., data.<type>.
+	// Patterns: var., local., module., data., output., <type>., data.<type>., type.name.
 	switch {
 	case strings.HasPrefix(lower, "var."):
 		prefix := token[len("var."):]
@@ -320,21 +440,44 @@ func (s *SymbolIndex) CompletionCandidates(line string, cursorIndex int) (candid
 			}
 		}
 	default:
-		// Resource completion: <type>[.name]
+		// Resource completion: <type>[.name[.attr]]
 		if i := strings.Index(token, "."); i == -1 {
-			// Completing a resource type
+			// Completing a top-level symbol: resource type OR category keywords (var/local/module/data/output)
 			for rType := range s.Resource {
 				if strings.HasPrefix(rType, token) {
 					candidates = append(candidates, rType)
 				}
 			}
+			// Also propose category starters if they match the current prefix (case-insensitive)
+			kwPrefix := strings.ToLower(token)
+			for _, kw := range []string{"var.", "local.", "module.", "data.", "output."} {
+				if strings.HasPrefix(kw, kwPrefix) {
+					candidates = append(candidates, kw)
+				}
+			}
 		} else {
-			rType := token[:i]
-			namePrefix := token[i+1:]
-			if names, ok := s.Resource[rType]; ok {
-				for _, n := range names {
-					if strings.HasPrefix(n, namePrefix) {
-						candidates = append(candidates, rType+"."+n)
+			rest := token
+			parts := strings.Split(rest, ".")
+			if len(parts) == 2 {
+				// <type>.<name-prefix>
+				rType := parts[0]
+				namePrefix := parts[1]
+				if names, ok := s.Resource[rType]; ok {
+					for _, n := range names {
+						if strings.HasPrefix(n, namePrefix) {
+							candidates = append(candidates, rType+"."+n)
+						}
+					}
+				}
+			} else if len(parts) >= 3 {
+				// <type>.<name>.<attr-prefix>
+				rType := parts[0]
+				attrPrefix := parts[2]
+				if attrs, ok := s.ResourceAttrs[rType]; ok {
+					for _, a := range attrs {
+						if strings.HasPrefix(a, attrPrefix) {
+							candidates = append(candidates, rType+"."+parts[1]+"."+a)
+						}
 					}
 				}
 			}

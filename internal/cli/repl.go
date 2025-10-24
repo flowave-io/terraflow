@@ -56,19 +56,195 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		defer historyFile.Close()
 	}
 	histIdx := -1 // -1 means not navigating
+	// TAB-cycle state
+	lastTabCands := []string{}
+	lastTabStart, lastTabEnd := 0, 0
+	lastTabIdx := -1
+	lastTabPrefix := ""
+	lastTabSuffix := ""
+	lastTabListRows := 0
+	// After accepting a suggestion, hide ghost until next user input
+	suppressGhostUntilInput := false
+	// cached ghost suggestion (history-based)
+	ghostCache := ""
+	// minimal ANSI styling support. Ghost = dim; highlight = also dim per request.
+	const ansiDim = "\x1b[2m"
+	const ansiReset = "\x1b[0m"
+	const ansiGhost = ansiDim
 	pendingRefresh := false
+
+	// Best history suggestion for the current full-line prefix
+	bestHistorySuggestion := func(prefix string) string {
+		if len(history) == 0 {
+			return ""
+		}
+		// Only suggest when cursor is at end of line to avoid mid-line confusion
+		if cursor != len(buf) {
+			return ""
+		}
+		if strings.TrimSpace(prefix) == "" {
+			return ""
+		}
+		// Scan MRU (latest first)
+		for i := len(history) - 1; i >= 0; i-- {
+			h := history[i]
+			if strings.HasPrefix(h, prefix) && h != prefix {
+				return h[len(prefix):]
+			}
+		}
+		return ""
+	}
+
+	// History candidates are no longer merged into TAB completion. We keep only index-based TAB suggestions.
 
 	render := func() {
 		// CR, clear line, print prompt and buffer, then move cursor back if needed
 		os.Stdout.WriteString("\r")
 		os.Stdout.WriteString("\x1b[2K") // clear entire line
 		os.Stdout.WriteString(prompt)
-		os.Stdout.WriteString(string(buf))
-		// Move cursor to correct position
-		tail := len(buf) - cursor
-		if tail > 0 {
-			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dD", tail))
+		line := string(buf)
+		os.Stdout.WriteString(line)
+		// Inline ghost suggestion from selection or history (dim)
+		ghost := ""
+		if !suppressGhostUntilInput && lastTabIdx >= 0 && len(lastTabCands) > 0 {
+			// Build ghost from currently selected candidate if it extends the current token
+			sel := lastTabCands[lastTabIdx]
+			// Compute current token text from up-to-date line
+			if lastTabStart >= 0 && lastTabStart <= len(line) && lastTabEnd >= lastTabStart && lastTabEnd <= len(line) {
+				tok := line[lastTabStart:lastTabEnd]
+				if strings.HasPrefix(sel, tok) && len(sel) > len(tok) {
+					ghost = sel[len(tok):]
+				}
+			}
 		}
+		if !suppressGhostUntilInput && ghost == "" {
+			ghost = bestHistorySuggestion(line)
+		}
+		ghostCache = ghost
+		if ghost != "" {
+			os.Stdout.WriteString(ansiGhost)
+			os.Stdout.WriteString(ghost)
+			os.Stdout.WriteString(ansiReset)
+		}
+		// Move cursor back over any ghost and the tail from mid-line edits
+		// First account for ghost length if cursor is not at end
+		back := 0
+		if ghost != "" {
+			back += len(ghost)
+		}
+		tail := len(buf) - cursor
+		back += tail
+		if back > 0 {
+			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dD", back))
+		}
+	}
+
+	// Helper: clear any printed suggestion list below the prompt
+	clearSuggestionList := func() {
+		if lastTabListRows > 0 {
+			// Move to first overlay line below the prompt
+			os.Stdout.WriteString("\x1b[1B")
+			for r := 0; r < lastTabListRows; r++ {
+				// Clear line
+				os.Stdout.WriteString("\r\x1b[2K")
+				// Move down to next overlay line except after the last one
+				if r < lastTabListRows-1 {
+					os.Stdout.WriteString("\x1b[1B")
+				}
+			}
+			// Return cursor to the prompt line
+			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastTabListRows))
+			lastTabListRows = 0
+		}
+	}
+
+	// Helpers to draw candidate lists with highlighting of the selected index
+	// For lists: non-selected items use ghost (dim), selected item uses normal text
+	// removed: ansiRev
+	// removed: printCandidatesFresh (we always overwrite in place)
+
+	printCandidatesOverwrite := func(cands []string, selected int, prevRows int) int {
+		w := detectTermWidth(tty)
+		if w <= 0 {
+			w = 80
+		}
+		maxLen := 0
+		for _, s := range cands {
+			if l := len(s); l > maxLen {
+				maxLen = l
+			}
+		}
+		pad := 2
+		colW := maxLen + pad
+		if colW <= 0 {
+			colW = 10
+		}
+		cols := w / colW
+		var rows int
+		if cols <= 1 {
+			rows = len(cands)
+		} else {
+			rows = (len(cands) + cols - 1) / cols
+		}
+		// Ensure there are dedicated overlay lines below the prompt.
+		// If this is the first draw, allocate `rows` new lines so we don't overwrite prior output.
+		if prevRows == 0 {
+			for i := 0; i < rows; i++ {
+				os.Stdout.WriteString("\r\n")
+			}
+			// Return cursor to the prompt line
+			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", rows))
+		} else if rows > prevRows {
+			// Allocate extra lines if the overlay grew
+			delta := rows - prevRows
+			for i := 0; i < delta; i++ {
+				os.Stdout.WriteString("\r\n")
+			}
+			// Return cursor to the prompt line
+			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", delta))
+		}
+		// Move to first list line; render overlay directly below prompt
+		os.Stdout.WriteString("\x1b[1B")
+		// Overwrite max(prevRows, rows) lines
+		total := prevRows
+		if rows > total {
+			total = rows
+		}
+		if total == 0 {
+			total = rows
+		}
+		for r := 0; r < total; r++ {
+			// Clear line
+			os.Stdout.WriteString("\r\x1b[2K")
+			if r < rows {
+				// Compose row r
+				for c := 0; c < cols; c++ {
+					idx := r + c*rows
+					if idx >= len(cands) {
+						break
+					}
+					s := cands[idx]
+					if idx != selected {
+						os.Stdout.WriteString(ansiGhost)
+					}
+					os.Stdout.WriteString(s)
+					if idx != selected {
+						os.Stdout.WriteString(ansiReset)
+					}
+					if c < cols-1 {
+						if sp := colW - len(s); sp > 0 {
+							os.Stdout.WriteString(strings.Repeat(" ", sp))
+						}
+					}
+				}
+			}
+			if r < total-1 {
+				os.Stdout.WriteString("\x1b[1B")
+			}
+		}
+		// Move back up to the prompt line
+		os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", total))
+		return rows
 	}
 
 	// completion logic inlined in TAB handler
@@ -140,7 +316,8 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	for {
 		select {
 		case <-refreshNotify:
-			// Re-render prompt without spamming the console
+			// Clear any overlay and re-render prompt without spamming the console
+			clearSuggestionList()
 			render()
 			continue
 		default:
@@ -167,6 +344,8 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		case '\r', '\n':
 			// Submit line
 			line := string(buf)
+			// Clear overlay before printing a new line
+			clearSuggestionList()
 			os.Stdout.WriteString("\r\n")
 			if strings.TrimSpace(line) != "" {
 				if line == "exit" || line == "quit" {
@@ -207,6 +386,11 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			}
 			buf = buf[:0]
 			cursor = 0
+			// reset TAB cycle and ghost
+			lastTabCands = nil
+			lastTabIdx = -1
+			// lastTabInput removed
+			ghostCache = ""
 			if pendingRefresh {
 				pendingRefresh = false
 			}
@@ -215,48 +399,92 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			if cursor > 0 {
 				buf = append(buf[:cursor-1], buf[cursor:]...)
 				cursor--
+				// any edit cancels TAB cycle
+				lastTabCands = nil
+				lastTabIdx = -1
+				// lastTabInput removed
+				clearSuggestionList()
 				render()
 			}
 		case 9: // TAB
-			// On TAB, try to complete; if multiple suggestions, insert common prefix
+			// User is actively requesting suggestions again; allow ghost
+			suppressGhostUntilInput = false
+			// TAB should not accept or suggest history; only use index candidates
 			line := string(buf)
-			cands, start, end := index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
-			if len(cands) == 0 {
-				// Rebuild index on-demand in case it's stale/empty
-				if newIdx, err := terraform.BuildSymbolIndex("."); err == nil {
-					index = newIdx
-					// Try again on updated index
-					cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
-				}
-				if len(cands) == 0 {
-					// Audible bell to confirm TAB was captured
-					os.Stdout.WriteString("\a")
-					os.Stdout.WriteString("\r\n(no matches)\r\n")
-				}
-			} else if len(cands) == 1 {
-				prefix := []rune(line[:start])
-				suffix := []rune(line[end:])
-				replacement := []rune(cands[0])
-				buf = append(append(prefix, replacement...), suffix...)
-				cursor = len(prefix) + len(replacement)
+			// Continue existing cycle if the user hasn't changed the surrounding text
+			cycleActive := lastTabIdx >= 0 && strings.HasPrefix(line, lastTabPrefix) && strings.HasSuffix(line, lastTabSuffix)
+
+			var cands []string
+			var start, end int
+			if cycleActive && len(lastTabCands) > 0 {
+				// Reuse previous candidate set and token bounds so TAB truly cycles
+				cands = lastTabCands
+				start, end = lastTabStart, lastTabEnd
 			} else {
-				// Compute common prefix from all candidates
+				cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
+				// Do not trigger a synchronous index rebuild on TAB; return fast for UX responsiveness
+			}
+
+			if len(cands) == 0 {
+				// No matches; return quickly and silently
+				os.Stdout.WriteString("\a")
+				render()
+				continue
+			}
+
+			// If first time or context changed, initialize cycle state
+			if !cycleActive {
+				// Initialize cycle and insert the common prefix shared by all candidates (if any)
+				lastTabCands = cands
+				// Compute longest common prefix among candidates
 				common := cands[0]
 				for _, c := range cands[1:] {
 					for len(common) > 0 && (len(c) < len(common) || c[:len(common)] != common) {
 						common = common[:len(common)-1]
 					}
 				}
-				if common != "" && common != line[start:end] {
-					prefix := []rune(line[:start])
-					suffix := []rune(line[end:])
-					replacement := []rune(common)
-					buf = append(append(prefix, replacement...), suffix...)
-					cursor = len(prefix) + len(replacement)
+				// Current token text
+				tok := line[start:end]
+				prefixStr := line[:start]
+				suffixStr := line[end:]
+				if common != "" && common != tok {
+					// Replace token with common prefix
+					pRunes := []rune(prefixStr)
+					rRunes := []rune(common)
+					sRunes := []rune(suffixStr)
+					buf = append(append(pRunes, rRunes...), sRunes...)
+					cursor = len(pRunes) + len(rRunes)
+					// Update token bounds after insertion
+					lastTabStart = len(prefixStr)
+					lastTabEnd = lastTabStart + len(common)
+					lastTabPrefix = prefixStr
+					lastTabSuffix = suffixStr
 				} else {
-					os.Stdout.WriteString("\r\n")
-					os.Stdout.WriteString(strings.Join(cands, "  "))
-					os.Stdout.WriteString("\r\n")
+					// No extra commonality; keep bounds as-is
+					lastTabStart, lastTabEnd = start, end
+					lastTabPrefix = prefixStr
+					lastTabSuffix = suffixStr
+				}
+				lastTabIdx = 0
+			} else {
+				// advance cycle
+				lastTabIdx++
+				if lastTabIdx >= len(lastTabCands) {
+					lastTabIdx = 0
+				}
+			}
+			// Keep buffer unchanged and only render ghost for all levels
+			sel := lastTabCands[lastTabIdx]
+			_ = sel
+			// keep lastTabInput removed; we now track stability via prefix/suffix containment
+			// Draw list unless we're at attribute level (type.name.attr*), where list should be hidden
+			if len(lastTabCands) > 0 {
+				attrLevel := strings.Count(sel, ".") >= 2
+				if attrLevel {
+					clearSuggestionList()
+				} else if len(lastTabCands) > 1 {
+					// Draw suggestions on a virtual overlay line without moving the prompt
+					lastTabListRows = printCandidatesOverwrite(lastTabCands, lastTabIdx, lastTabListRows)
 				}
 			}
 			render()
@@ -268,11 +496,48 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				case 'C': // right
 					if cursor < len(buf) {
 						cursor++
+						lastTabCands = nil
+						lastTabIdx = -1
+						clearSuggestionList()
+					} else if ghostCache != "" {
+						// Accept ghost suggestion at EOL
+						ins := []rune(ghostCache)
+						buf = append(buf, ins...)
+						cursor = len(buf)
+						ghostCache = ""
+						// Clear any visible list once ghost is accepted
+						clearSuggestionList()
+						// Reset cycle state to avoid stale ghosts
+						lastTabCands = nil
+						lastTabIdx = -1
+						lastTabPrefix = ""
+						lastTabSuffix = ""
+						lastTabStart, lastTabEnd = 0, 0
+						suppressGhostUntilInput = true
+					} else if lastTabIdx >= 0 && len(lastTabCands) > 0 {
+						// Accept currently selected suggestion even if ghost is hidden (e.g., attribute level)
+						line := string(buf)
+						_ = line
+						sel := lastTabCands[lastTabIdx]
+						p := []rune(lastTabPrefix)
+						s := []rune(lastTabSuffix)
+						r := []rune(sel)
+						buf = append(append(p, r...), s...)
+						cursor = len(p) + len(r)
+						clearSuggestionList()
+						// Reset cycle state to avoid stale ghosts
+						lastTabCands = nil
+						lastTabIdx = -1
+						lastTabPrefix = ""
+						lastTabSuffix = ""
+						lastTabStart, lastTabEnd = 0, 0
+						suppressGhostUntilInput = true
 					}
 				case 'D': // left
 					if cursor > 0 {
 						cursor--
 					}
+					clearSuggestionList()
 				case 'A': // up - history prev
 					if len(history) > 0 {
 						if histIdx == -1 {
@@ -295,6 +560,74 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 						}
 						cursor = len(buf)
 					}
+				case 'Z': // Shift+TAB (reverse cycle)
+					// Mirror TAB behavior but cycle backward. Do not modify the buffer
+					// (other than inserting a common prefix on first activation).
+					suppressGhostUntilInput = false
+					line := string(buf)
+					cycleActive := lastTabIdx >= 0 && strings.HasPrefix(line, lastTabPrefix) && strings.HasSuffix(line, lastTabSuffix)
+
+					var cands []string
+					var start, end int
+					if cycleActive && len(lastTabCands) > 0 {
+						cands = lastTabCands
+						start, end = lastTabStart, lastTabEnd
+					} else {
+						cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
+						if len(cands) == 0 {
+							os.Stdout.WriteString("\a")
+							render()
+							break
+						}
+						// Initialize cycle and optionally insert common prefix among candidates
+						lastTabCands = cands
+						common := cands[0]
+						for _, c := range cands[1:] {
+							for len(common) > 0 && (len(c) < len(common) || c[:len(common)] != common) {
+								common = common[:len(common)-1]
+							}
+						}
+						tok := line[start:end]
+						prefixStr := line[:start]
+						suffixStr := line[end:]
+						if common != "" && common != tok {
+							pRunes := []rune(prefixStr)
+							rRunes := []rune(common)
+							sRunes := []rune(suffixStr)
+							buf = append(append(pRunes, rRunes...), sRunes...)
+							cursor = len(pRunes) + len(rRunes)
+							lastTabStart = len(prefixStr)
+							lastTabEnd = lastTabStart + len(common)
+							lastTabPrefix = prefixStr
+							lastTabSuffix = suffixStr
+						} else {
+							lastTabStart, lastTabEnd = start, end
+							lastTabPrefix = prefixStr
+							lastTabSuffix = suffixStr
+						}
+						// Start from the last candidate for reverse cycling
+						lastTabIdx = len(lastTabCands) - 1
+					}
+
+					if cycleActive && len(lastTabCands) > 0 {
+						// Move backward in the cycle
+						lastTabIdx--
+						if lastTabIdx < 0 {
+							lastTabIdx = len(lastTabCands) - 1
+						}
+					}
+
+					// Draw list overlay similar to TAB without inserting selection
+					if len(lastTabCands) > 0 {
+						sel := lastTabCands[lastTabIdx]
+						attrLevel := strings.Count(sel, ".") >= 2
+						if attrLevel {
+							clearSuggestionList()
+						} else if len(lastTabCands) > 1 {
+							lastTabListRows = printCandidatesOverwrite(lastTabCands, lastTabIdx, lastTabListRows)
+						}
+					}
+					render()
 				}
 				render()
 			}
@@ -305,6 +638,11 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				r := rune(b)
 				buf = append(buf[:cursor], append([]rune{r}, buf[cursor:]...)...)
 				cursor++
+				// any edit cancels TAB cycle
+				lastTabCands = nil
+				lastTabIdx = -1
+				clearSuggestionList()
+				suppressGhostUntilInput = false
 				render()
 			}
 		}

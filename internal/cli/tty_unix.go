@@ -54,3 +54,48 @@ func acquireTTY() (*os.File, func(), error) {
 	}
 	return tty, restore, nil
 }
+
+// detectTermWidth attempts to determine terminal column width on Unix systems.
+// Falls back to COLUMNS env or 80 when detection fails.
+func detectTermWidth(tty *os.File) int {
+	// Prefer stty size; returns "rows cols".
+	var cmd *exec.Cmd
+	if runtime.GOOS == "darwin" {
+		cmd = exec.Command("stty", "-f", "/dev/tty", "size")
+	} else {
+		cmd = exec.Command("stty", "size")
+	}
+	if tty != nil {
+		cmd.Stdin = tty
+	}
+	out, err := cmd.Output()
+	if err == nil {
+		parts := strings.Fields(strings.TrimSpace(string(out)))
+		if len(parts) == 2 {
+			// parts[1] is columns
+			if n, convErr := atoiSafe(parts[1]); convErr == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	if c := os.Getenv("COLUMNS"); c != "" {
+		if n, err := atoiSafe(c); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 80
+}
+
+func atoiSafe(s string) (int, error) {
+	// Trim and parse without importing strconv globally in multiple files.
+	s = strings.TrimSpace(s)
+	var n int
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch < '0' || ch > '9' {
+			return 0, fmt.Errorf("not a number: %q", s)
+		}
+		n = n*10 + int(ch-'0')
+	}
+	return n, nil
+}
