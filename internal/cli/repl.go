@@ -374,6 +374,46 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			os.Stdout.WriteString("\r\n[exit]\r\n")
 			return
 		case '\r', '\n':
+			// If TAB cycle is active, ENTER accepts the selected suggestion (no execute).
+			// Otherwise, if a ghost suggestion exists at EOL, accept it (no execute).
+			curLine := string(buf)
+			cycleActive := lastTabIdx >= 0 && strings.HasPrefix(curLine, lastTabPrefix) && strings.HasSuffix(curLine, lastTabSuffix)
+			if cycleActive && len(lastTabCands) > 0 {
+				// Accept currently selected TAB suggestion instead of executing
+				sel := lastTabCands[lastTabIdx]
+				p := []rune(lastTabPrefix)
+				s := []rune(lastTabSuffix)
+				r := []rune(sel)
+				buf = append(append(p, r...), s...)
+				cursor = len(p) + len(r)
+				clearSuggestionList()
+				// Reset cycle state to avoid stale ghosts
+				lastTabCands = nil
+				lastTabIdx = -1
+				lastTabPrefix = ""
+				lastTabSuffix = ""
+				lastTabStart, lastTabEnd = 0, 0
+				suppressGhostUntilInput = true
+				render()
+				continue
+			}
+			if cursor == len(buf) && ghostCache != "" {
+				// Accept ghost suggestion instead of executing
+				ins := []rune(ghostCache)
+				buf = append(buf, ins...)
+				cursor = len(buf)
+				ghostCache = ""
+				clearSuggestionList()
+				// Reset cycle state
+				lastTabCands = nil
+				lastTabIdx = -1
+				lastTabPrefix = ""
+				lastTabSuffix = ""
+				lastTabStart, lastTabEnd = 0, 0
+				suppressGhostUntilInput = true
+				render()
+				continue
+			}
 			// Submit line
 			line := string(buf)
 			// Clear overlay before printing a new line
