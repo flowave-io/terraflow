@@ -48,7 +48,7 @@ func RunConsoleCommand(args []string) {
 
 	refreshCh := make(chan struct{}, 1)
 	session := terraform.StartConsoleSession(scratchDir, statePath)
-	idx, err := terraform.BuildSymbolIndex(scratchDir)
+	idx, err := terraform.BuildSymbolIndex(cwd)
 	if err != nil {
 		log.Println("[warn] building symbol index:", err)
 		idx = &terraform.SymbolIndex{}

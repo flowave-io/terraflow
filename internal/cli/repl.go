@@ -328,7 +328,8 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			// Only rebuild index if structural .tf files changed; tfvars-only changes
 			// should not impact completion. This reduces refresh cost.
 			if !changedTFOnly {
-				if newIdx, err := terraform.BuildSymbolIndex(scratchDir); err == nil {
+				// Rebuild index from project root to include all locals/modules even if some files are skipped in scratch
+				if newIdx, err := terraform.BuildSymbolIndex(cwd); err == nil {
 					index = newIdx
 				}
 			}
@@ -441,8 +442,23 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			// User is actively requesting suggestions again; allow ghost
 			suppressGhostUntilInput = false
 			line := string(buf)
-			// If not cycling and at EOL, prefer accepting a function ghost (not history)
-			if lastTabIdx < 0 && cursor == len(buf) && len(index.Functions) > 0 {
+			// TAB should not accept or suggest history; prefer index candidates over function ghosts.
+			// Determine cycle state and current index candidates.
+			cycleActive := lastTabIdx >= 0 && strings.HasPrefix(line, lastTabPrefix) && strings.HasSuffix(line, lastTabSuffix)
+
+			var cands []string
+			var start, end int
+			if cycleActive && len(lastTabCands) > 0 {
+				// Reuse previous candidate set and token bounds so TAB truly cycles
+				cands = lastTabCands
+				start, end = lastTabStart, lastTabEnd
+			} else {
+				cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
+				// Do not trigger a synchronous index rebuild on TAB; return fast for UX responsiveness
+			}
+
+			// If not cycling and at EOL, only accept a function ghost when there are no index candidates.
+			if !cycleActive && cursor == len(buf) && len(index.Functions) > 0 && len(cands) == 0 {
 				// Recompute function ghost like in render(), to avoid accepting history ghosts
 				i := len(line)
 				startTok := i
@@ -484,20 +500,6 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 					render()
 					continue
 				}
-			}
-			// TAB should not accept or suggest history; only use index candidates
-			// Continue existing cycle if the user hasn't changed the surrounding text
-			cycleActive := lastTabIdx >= 0 && strings.HasPrefix(line, lastTabPrefix) && strings.HasSuffix(line, lastTabSuffix)
-
-			var cands []string
-			var start, end int
-			if cycleActive && len(lastTabCands) > 0 {
-				// Reuse previous candidate set and token bounds so TAB truly cycles
-				cands = lastTabCands
-				start, end = lastTabStart, lastTabEnd
-			} else {
-				cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
-				// Do not trigger a synchronous index rebuild on TAB; return fast for UX responsiveness
 			}
 
 			if len(cands) == 0 {

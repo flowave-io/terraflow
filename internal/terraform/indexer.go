@@ -453,9 +453,25 @@ func (s *SymbolIndex) CompletionCandidates(line string, cursorIndex int) (candid
 					candidates = append(candidates, rType)
 				}
 			}
-			// Also propose category starters if they match the current prefix (case-insensitive)
+			// Also propose category starters that actually exist in the index and match the current prefix (case-insensitive)
 			kwPrefix := strings.ToLower(token)
-			for _, kw := range []string{"var.", "local.", "module.", "data.", "output."} {
+			starters := make([]string, 0, 5)
+			if len(s.Variables) > 0 {
+				starters = append(starters, "var.")
+			}
+			if len(s.Locals) > 0 {
+				starters = append(starters, "local.")
+			}
+			if len(s.Modules) > 0 {
+				starters = append(starters, "module.")
+			}
+			if len(s.DataSource) > 0 {
+				starters = append(starters, "data.")
+			}
+			if len(s.Outputs) > 0 {
+				starters = append(starters, "output.")
+			}
+			for _, kw := range starters {
 				if strings.HasPrefix(kw, kwPrefix) {
 					candidates = append(candidates, kw)
 				}
