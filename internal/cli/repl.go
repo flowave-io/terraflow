@@ -117,6 +117,37 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				}
 			}
 		}
+		// Function ghost suggestion (only when not cycling TAB and at EOL)
+		if !suppressGhostUntilInput && ghost == "" && lastTabIdx < 0 && cursor == len(buf) && len(index.Functions) > 0 {
+			// Determine the current bare identifier token (letters/digits/underscore only)
+			i := len(line)
+			start := i
+			for start > 0 {
+				r := rune(line[start-1])
+				if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+					start--
+					continue
+				}
+				break
+			}
+			tok := line[start:i]
+			if tok != "" {
+				// Avoid suggesting inside attribute chains like module.x.abc
+				if start == 0 || line[start-1] != '.' {
+					lt := strings.ToLower(tok)
+					for _, fn := range index.Functions {
+						if strings.HasPrefix(fn, lt) {
+							if fn == lt {
+								ghost = "("
+							} else {
+								ghost = fn[len(lt):] + "("
+							}
+							break
+						}
+					}
+				}
+			}
+		}
 		if !suppressGhostUntilInput && ghost == "" {
 			ghost = bestHistorySuggestion(line)
 		}
@@ -409,8 +440,52 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		case 9: // TAB
 			// User is actively requesting suggestions again; allow ghost
 			suppressGhostUntilInput = false
-			// TAB should not accept or suggest history; only use index candidates
 			line := string(buf)
+			// If not cycling and at EOL, prefer accepting a function ghost (not history)
+			if lastTabIdx < 0 && cursor == len(buf) && len(index.Functions) > 0 {
+				// Recompute function ghost like in render(), to avoid accepting history ghosts
+				i := len(line)
+				startTok := i
+				for startTok > 0 {
+					r := rune(line[startTok-1])
+					if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+						startTok--
+						continue
+					}
+					break
+				}
+				tok := line[startTok:i]
+				fghost := ""
+				if tok != "" && (startTok == 0 || line[startTok-1] != '.') {
+					lt := strings.ToLower(tok)
+					for _, fn := range index.Functions {
+						if strings.HasPrefix(fn, lt) {
+							if fn == lt {
+								fghost = "("
+							} else {
+								fghost = fn[len(lt):] + "("
+							}
+							break
+						}
+					}
+				}
+				if fghost != "" {
+					ins := []rune(fghost)
+					buf = append(buf, ins...)
+					cursor = len(buf)
+					// Do not start a cycle; keep functions out of lists
+					lastTabCands = nil
+					lastTabIdx = -1
+					lastTabPrefix = ""
+					lastTabSuffix = ""
+					lastTabStart, lastTabEnd = 0, 0
+					clearSuggestionList()
+					suppressGhostUntilInput = true
+					render()
+					continue
+				}
+			}
+			// TAB should not accept or suggest history; only use index candidates
 			// Continue existing cycle if the user hasn't changed the surrounding text
 			cycleActive := lastTabIdx >= 0 && strings.HasPrefix(line, lastTabPrefix) && strings.HasSuffix(line, lastTabSuffix)
 

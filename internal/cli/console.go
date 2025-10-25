@@ -41,6 +41,11 @@ func RunConsoleCommand(args []string) {
 		log.Printf("[warn] terraform init in scratch: %v\n", err)
 	}
 
+	// Ensure functions cache exists once
+	if err := terraform.EnsureFunctionsCached(scratchDir); err != nil {
+		log.Printf("[warn] unable to cache Terraform functions: %v\n", err)
+	}
+
 	refreshCh := make(chan struct{}, 1)
 	session := terraform.StartConsoleSession(scratchDir, statePath)
 	idx, err := terraform.BuildSymbolIndex(scratchDir)

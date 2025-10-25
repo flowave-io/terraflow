@@ -28,6 +28,8 @@ type SymbolIndex struct {
 	// Collected attribute keys seen in configuration for each resource/data type
 	ResourceAttrs map[string][]string // resource type -> attribute keys (from config)
 	DataAttrs     map[string][]string // data type -> attribute keys (from config)
+	// Terraform built-in functions (from cached docs). Used only for ghost suggestions.
+	Functions []string
 }
 
 // BuildSymbolIndex loads configuration from dir using tfconfig and hcl. It
@@ -84,6 +86,9 @@ func BuildSymbolIndex(dir string) (*SymbolIndex, error) {
 	for k, v := range idx.DataAttrs {
 		idx.DataAttrs[k] = uniqueSorted(v)
 	}
+
+	// Load cached Terraform function names for ghost-only suggestions
+	idx.Functions = LoadTerraformFunctions(dir)
 
 	// Return partial index and a combined error if present
 	return idx, allErr
