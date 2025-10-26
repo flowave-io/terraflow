@@ -24,7 +24,8 @@ type ConsoleSession struct {
 var bufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 // StartConsoleSession creates a new ephemeral-eval session that records working directory and state path.
-func StartConsoleSession(workDir, statePath string) *ConsoleSession {
+// varFiles are forwarded to `terraform console` as repeated -var-file flags.
+func StartConsoleSession(workDir, statePath string, varFiles []string) *ConsoleSession {
 	s := &ConsoleSession{statePath: statePath, workDir: workDir}
 	// Compute binary path once
 	if p, err := exec.LookPath("terraform"); err == nil {
@@ -38,6 +39,13 @@ func StartConsoleSession(workDir, statePath string) *ConsoleSession {
 		if fi, err := os.Stat(sp); err == nil && !fi.IsDir() {
 			s.args = append(s.args, "-state", sp)
 		}
+	}
+	// Append any provided -var-file flags in the given order
+	for _, vf := range varFiles {
+		if strings.TrimSpace(vf) == "" {
+			continue
+		}
+		s.args = append(s.args, "-var-file", vf)
 	}
 	// Precompute env
 	env := append([]string{}, os.Environ()...)

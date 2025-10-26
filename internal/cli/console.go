@@ -7,14 +7,33 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/flowave-io/terraflow/internal/monitor"
 	"github.com/flowave-io/terraflow/internal/terraform"
 )
 
+// multiStringFlag implements flag.Value allowing repeated -var-file flags
+type multiStringFlag []string
+
+func (m *multiStringFlag) String() string {
+	if m == nil {
+		return ""
+	}
+	return strings.Join(*m, ",")
+}
+
+func (m *multiStringFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
+
 func RunConsoleCommand(args []string) {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.SetOutput(os.Stdout)
+	// Support multiple -var-file flags similar to Terraform
+	var varFiles multiStringFlag
+	fs.Var(&varFiles, "var-file", "Path to a .tfvars file (repeatable). Passed through to terraform console.")
 	pullRemoteState := fs.Bool("pull-remote-state", false, "Pull remote state once and reuse locally in .terraflow/")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -47,7 +66,7 @@ func RunConsoleCommand(args []string) {
 	}
 
 	refreshCh := make(chan struct{}, 1)
-	session := terraform.StartConsoleSession(scratchDir, statePath)
+	session := terraform.StartConsoleSession(scratchDir, statePath, []string(varFiles))
 	idx, err := terraform.BuildSymbolIndex(cwd)
 	if err != nil {
 		log.Println("[warn] building symbol index:", err)
@@ -73,6 +92,10 @@ Example walkthrough (see test/README.md for test workflow):
   3. Edit any .tf or .tfvars file: changes are live—your next expression sees updated context.
 
 Supported files: *.tf, *.tfvars (recursive in subdirs).
+
+Flags:
+  -var-file <path>   Repeatable. Same semantics as 'terraform console -var-file'.
+                     Path is passed through unchanged; files are synced into ./.terraflow.
 
 For more, see test/fixtures/ and README.md for sample scenarios.
 `)
