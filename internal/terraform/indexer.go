@@ -88,7 +88,14 @@ func BuildSymbolIndex(dir string) (*SymbolIndex, error) {
 	}
 
 	// Load cached Terraform function names for ghost-only suggestions
-	idx.Functions = LoadTerraformFunctions(dir)
+	// Prefer the project's .terraflow cache directory if present.
+	funcDir := filepath.Join(dir, ".terraflow")
+	if fi, err := os.Stat(funcDir); err == nil && fi.IsDir() {
+		idx.Functions = LoadTerraformFunctions(funcDir)
+	} else {
+		// Fallback to dir for backward-compat or tests that place functions.json there
+		idx.Functions = LoadTerraformFunctions(dir)
+	}
 
 	// Return partial index and a combined error if present
 	return idx, allErr
