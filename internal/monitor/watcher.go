@@ -6,17 +6,19 @@ import (
 	"time"
 )
 
+// watchExtensions lists Terraform-related file extensions that trigger refreshes.
 var watchExtensions = []string{".tf", ".tfvars"}
 
-// WatchTerraformFilesNotifying receives a channel and sends a notification on changes
+// WatchTerraformFilesNotifying periodically polls Terraform files under dir and
+// sends a signal on refreshCh when any relevant file changes.
 func WatchTerraformFilesNotifying(dir string, refreshCh chan<- struct{}) {
 	last := map[string]time.Time{}
-	// Debounce bursts of edits within this interval
-	const debounce = 500 * time.Millisecond
+	// Debounce bursts of edits within this interval (aggressive)
+	const debounce = 20 * time.Millisecond
 	var pending bool
 	var lastFire time.Time
 	go func() {
-		ticker := time.NewTicker(300 * time.Millisecond)
+		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()
 		for range ticker.C {
 			if pollTerraformFiles(dir, last) {

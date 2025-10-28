@@ -7,3 +7,7 @@ run:
 	go run ./cmd/terraflow
 lint:
 	golangci-lint run
+fmt:
+	go fmt ./...
+vet:
+	go vet ./...

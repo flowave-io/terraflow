@@ -65,8 +65,21 @@ func RunConsoleCommand(args []string) {
 		log.Printf("[warn] unable to cache Terraform functions: %v\n", err)
 	}
 
+	// Normalize var-file paths early (used for startup hydration and session)
+	normVarFiles := normalizeVarFiles(scratchDir, []string(varFiles))
+
+	// Ensure local state exists and reflect current config into it before starting console
+	if err := terraform.EnsureStateInitialized(statePath); err != nil {
+		log.Printf("[warn] ensure local state: %v\n", err)
+	} else {
+		// Use fast evaluated patch to hydrate non-literals on startup (with normalized var-files)
+		if err := terraform.PatchStateFromConfigEvaluatedFast(scratchDir, scratchDir, statePath, normVarFiles); err != nil {
+			log.Printf("[warn] patch state from config (evaluated): %v\n", err)
+		}
+	}
+
 	refreshCh := make(chan struct{}, 1)
-	session := terraform.StartConsoleSession(scratchDir, statePath, []string(varFiles))
+	session := terraform.StartConsoleSession(scratchDir, statePath, normVarFiles)
 	idx, err := terraform.BuildSymbolIndex(cwd)
 	if err != nil {
 		log.Println("[warn] building symbol index:", err)
@@ -74,7 +87,7 @@ func RunConsoleCommand(args []string) {
 	}
 	log.Println("Terraform console started.")
 	monitor.WatchTerraformFilesNotifying(".", refreshCh)
-	RunREPL(session, idx, refreshCh, scratchDir)
+	RunREPL(session, idx, refreshCh, scratchDir, normVarFiles)
 }
 
 func printConsoleHelp() {
@@ -136,4 +149,32 @@ func pullRemoteStateOnce(workDir, statePath string) error {
 		return fmt.Errorf("finalize state: %w", err)
 	}
 	return nil
+}
+
+// normalizeVarFiles returns paths suitable for use when running from scratchDir.
+// If a var-file path is absolute, keep as-is. If relative, resolve under scratchDir
+// and fall back to the original path if the scratch copy is missing.
+func normalizeVarFiles(scratchDir string, vfs []string) []string {
+	if len(vfs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(vfs))
+	for _, vf := range vfs {
+		if strings.TrimSpace(vf) == "" {
+			continue
+		}
+		if filepath.IsAbs(vf) {
+			out = append(out, vf)
+			continue
+		}
+		// Try scratch path first
+		s := filepath.Join(scratchDir, vf)
+		if _, err := os.Stat(s); err == nil {
+			out = append(out, s)
+			continue
+		}
+		// Fallback to original relative path
+		out = append(out, vf)
+	}
+	return out
 }

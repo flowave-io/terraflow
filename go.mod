@@ -3,6 +3,7 @@ module github.com/flowave-io/terraflow
 go 1.24
 
 require (
+    github.com/fsnotify/fsnotify v1.7.0
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-getter v1.8.2
 	github.com/hashicorp/go-multierror v1.1.1

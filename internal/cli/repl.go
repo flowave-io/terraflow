@@ -13,21 +13,10 @@ import (
 // RunREPL starts the interactive console loop with history and autocompletion.
 // Uses raw TTY on Unix to capture TAB and arrows; gracefully degrades otherwise.
 // scratchDir is the working directory used by terraform console (e.g., .terraflow).
-func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, refreshCh <-chan struct{}, scratchDir string) {
+func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, refreshCh <-chan struct{}, scratchDir string, varFiles []string) {
 	// Setup persistent history file under scratch directory
 	cwd, _ := os.Getwd()
 	historyPath := filepath.Join(scratchDir, ".terraflow_history")
-	// Preload history if exists
-	if b, err := os.ReadFile(historyPath); err == nil {
-		for _, ln := range strings.Split(string(b), "\n") {
-			ln = strings.TrimRight(ln, "\r")
-			if strings.TrimSpace(ln) == "" {
-				continue
-			}
-			// loaded into in-memory history before TTY starts
-			// history slice is defined below; we will append after initialization
-		}
-	}
 	tty, restore, _ := acquireTTY()
 	if restore != nil {
 		defer restore()
@@ -308,6 +297,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 
 	// Non-blocking refresh watcher
 	refreshNotify := make(chan struct{}, 1)
+	lastScan := time.Now()
 	go func() {
 		for range refreshCh {
 			pendingRefresh = true
@@ -322,6 +312,29 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				}
 				// Track whether only tfvars/json changed (no .tf)
 				changedTFOnly = !changedTF
+				// Fast-path: literal-only patch is instant
+				statePath := filepath.Join(scratchDir, "terraform.tfstate")
+				_ = terraform.PatchStateFromConfigLiterals(scratchDir, statePath)
+				// Target only files changed since last scan for non-literals
+				changedFiles := []string{}
+				filepath.Walk(scratchDir, func(p string, info os.FileInfo, err error) error {
+					if err != nil || info.IsDir() {
+						return nil
+					}
+					if strings.ToLower(filepath.Ext(p)) != ".tf" {
+						return nil
+					}
+					if info.ModTime().After(lastScan) {
+						changedFiles = append(changedFiles, p)
+					}
+					return nil
+				})
+				if len(changedFiles) > 0 {
+					// For each changed resource block/attribute, run the exact same targeted logic
+					// by calling the exact attribute patch for type+name+attr
+					_ = terraform.PatchTargetedExactByFiles(scratchDir, scratchDir, statePath, varFiles, changedFiles)
+				}
+				lastScan = time.Now()
 			}
 			// Restart console and rebuild index in the background
 			session.Restart()
