@@ -34,6 +34,9 @@ func RunConsoleCommand(args []string) {
 	// Support multiple -var-file flags similar to Terraform
 	var varFiles multiStringFlag
 	fs.Var(&varFiles, "var-file", "Path to a .tfvars file (repeatable). Passed through to terraform console.")
+	// Support partial backend configuration like Terraform's -backend-config (repeatable)
+	var backendConfigs multiStringFlag
+	fs.Var(&backendConfigs, "backend-config", "Partial backend config (KEY=VALUE or file). Repeatable. Triggers terraform init.")
 	pullRemoteState := fs.Bool("pull-remote-state", false, "Pull remote state once and reuse locally in .terraflow/")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -45,9 +48,16 @@ func RunConsoleCommand(args []string) {
 	scratchDir := filepath.Join(cwd, ".terraflow")
 	statePath := filepath.Join(scratchDir, "terraform.tfstate")
 
+	// If any -backend-config is specified, run a full terraform init in the project directory first
+	if len(backendConfigs) > 0 && !*pullRemoteState {
+		if err := terraform.InitWithBackendConfig(cwd, []string(backendConfigs)); err != nil {
+			log.Fatalf("terraform init with backend-config failed: %v", err)
+		}
+	}
+
 	// Optional: pull remote state into the scratch state file BEFORE init
 	if *pullRemoteState {
-		if err := pullRemoteStateOnce(cwd, statePath); err != nil {
+		if err := pullRemoteStateOnce(cwd, statePath, []string(backendConfigs)); err != nil {
 			log.Printf("[warn] unable to pull remote state: %v\n", err)
 		}
 	}
@@ -90,33 +100,9 @@ func RunConsoleCommand(args []string) {
 	RunREPL(session, idx, refreshCh, scratchDir, normVarFiles)
 }
 
-func printConsoleHelp() {
-	fmt.Print(`terraflow console: Live-updating Terraform console
-
-Starts an interactive 'terraform console' that seamlessly updates when .tf/.tfvars files change.
-No need to restart manually: edit your Terraform files and context is auto-reloaded for you.
-
-Typical usage:
-  terraflow console
-
-Example walkthrough (see test/README.md for test workflow):
-  1. Run 'terraflow console' in a directory with your .tf files.
-  2. At the prompt, try evaluating variables/expressions.
-  3. Edit any .tf or .tfvars file: changes are live—your next expression sees updated context.
-
-Supported files: *.tf, *.tfvars (recursive in subdirs).
-
-Flags:
-  -var-file <path>   Repeatable. Same semantics as 'terraform console -var-file'.
-                     Path is passed through unchanged; files are synced into ./.terraflow.
-
-For more, see test/fixtures/ and README.md for sample scenarios.
-`)
-}
-
 // pullRemoteStateOnce ensures the project at workDir is initialized and pulls remote state
 // via `terraform state pull`, writing it to statePath. Parent dir is 0700; state file 0600.
-func pullRemoteStateOnce(workDir, statePath string) error {
+func pullRemoteStateOnce(workDir, statePath string, backendConfigs []string) error {
 	if workDir == "" {
 		wd, _ := os.Getwd()
 		workDir = wd
@@ -127,12 +113,8 @@ func pullRemoteStateOnce(workDir, statePath string) error {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 	// Initialize the project so backend config is available for state pull
-	initCmd := exec.Command("terraform", "init", "-input=false")
-	initCmd.Dir = workDir
-	initCmd.Stdout = os.Stdout
-	initCmd.Stderr = os.Stderr
-	if err := initCmd.Run(); err != nil {
-		return fmt.Errorf("terraform init: %w", err)
+	if err := terraform.InitWithBackendConfig(workDir, backendConfigs); err != nil {
+		return err
 	}
 	// Pull remote state
 	pullCmd := exec.Command("terraform", "state", "pull", "-no-color")

@@ -280,3 +280,25 @@ func copyFile(src, dst string, perm os.FileMode) error {
 	}
 	return os.Rename(tmpPath, dst)
 }
+
+// InitWithBackendConfig runs `terraform init` in workDir, forwarding any provided
+// partial backend configuration values as repeated -backend-config flags. Values
+// may be KEY=VALUE pairs or paths to *.tfbackend files, matching Terraform's semantics.
+func InitWithBackendConfig(workDir string, backendConfigs []string) error {
+	args := []string{"init", "-input=false", "-no-color"}
+	for _, bc := range backendConfigs {
+		bc = strings.TrimSpace(bc)
+		if bc == "" {
+			continue
+		}
+		args = append(args, "-backend-config="+bc)
+	}
+	cmd := exec.Command("terraform", args...)
+	cmd.Dir = workDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("terraform init: %w", err)
+	}
+	return nil
+}
