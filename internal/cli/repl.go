@@ -52,6 +52,8 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	lastTabPrefix := ""
 	lastTabSuffix := ""
 	lastTabListRows := 0
+	// Track how many additional visual lines we printed for multiline rendering
+	lastMultilineRows := 0
 	// After accepting a suggestion, hide ghost until next user input
 	suppressGhostUntilInput := false
 	// cached ghost suggestion (history-based)
@@ -87,12 +89,46 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	// History candidates are no longer merged into TAB completion. We keep only index-based TAB suggestions.
 
 	render := func() {
-		// CR, clear line, print prompt and buffer, then move cursor back if needed
-		os.Stdout.WriteString("\r")
-		os.Stdout.WriteString("\x1b[2K") // clear entire line
+		// If the previous render printed multiple visual lines, move to the first line
+		if lastMultilineRows > 0 {
+			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastMultilineRows))
+		}
+		// Clear current line and any previously printed continuation lines
+		// Clear first line
+		os.Stdout.WriteString("\r\x1b[2K")
+		// Clear additional lines below if any
+		if lastMultilineRows > 0 {
+			for r := 0; r < lastMultilineRows; r++ {
+				os.Stdout.WriteString("\x1b[1B\r\x1b[2K")
+			}
+			// Return cursor to the first line
+			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastMultilineRows))
+		}
+
+		// Render prompt and buffer
 		os.Stdout.WriteString(prompt)
 		line := string(buf)
+		hasNL := strings.Contains(line, "\n")
+		if hasNL {
+			// Multiline mode: print with continuation prompt; disable ghosts and mid-line cursoring
+			parts := strings.Split(line, "\n")
+			if len(parts) > 0 {
+				os.Stdout.WriteString(parts[0])
+			}
+			for _, seg := range parts[1:] {
+				os.Stdout.WriteString("\r\n")
+				os.Stdout.WriteString(".. ")
+				os.Stdout.WriteString(seg)
+			}
+			ghostCache = ""
+			lastMultilineRows = len(parts) - 1
+			return
+		}
+		// Not multiline anymore
+		lastMultilineRows = 0
+		// Write the current single-line buffer
 		os.Stdout.WriteString(line)
+
 		// Inline ghost suggestion from selection or history (dim)
 		ghost := ""
 		if !suppressGhostUntilInput && lastTabIdx >= 0 && len(lastTabCands) > 0 {
@@ -269,7 +305,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 
 	// completion logic inlined in TAB handler
 
-	readKey := make([]byte, 3) // support ESC [ A sequences
+	readKey := make([]byte, 1024) // read chunks; handle ESC sequences and bracketed paste within chunk
 
 	// Ensure newlines render correctly in raw TTY: map lone \n to \r\n
 	normalizeTTYNewlines := func(s string) string {
@@ -294,6 +330,11 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		}
 		return b.String()
 	}
+
+	// Enable bracketed paste mode (widely supported) so multiline pastes are bracketed
+	// Start: ESC[200~ , End: ESC[201~
+	os.Stdout.WriteString("\x1b[?2004h")
+	defer os.Stdout.WriteString("\x1b[?2004l")
 
 	// Non-blocking refresh watcher
 	refreshNotify := make(chan struct{}, 1)
@@ -358,6 +399,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	go func() {
 		_, _, _ = session.Evaluate("0", 10*time.Second)
 	}()
+	inPaste := false
 	for {
 		select {
 		case <-refreshNotify:
@@ -368,412 +410,510 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		default:
 		}
 
-		// Read a single byte first
-		n, err := tty.Read(readKey[:1])
+		// Read up to the buffer size; process sequentially
+		n, err := tty.Read(readKey)
 		if err != nil || n == 0 {
 			os.Stdout.WriteString("\r\n")
 			return
 		}
-		b := readKey[0]
-		switch b {
-		case 3: // Ctrl+C — behave like Bash: clear current input and show a fresh prompt
-			os.Stdout.WriteString("\r\n")
-			buf = buf[:0]
-			cursor = 0
-			histIdx = -1
-			render()
-			continue
-		case 4: // Ctrl+D
-			os.Stdout.WriteString("\r\n[exit]\r\n")
-			return
-		case '\r', '\n':
-			// If TAB cycle is active, ENTER accepts the selected suggestion (no execute).
-			// Otherwise, if a ghost suggestion exists at EOL, accept it (no execute).
-			curLine := string(buf)
-			cycleActive := lastTabIdx >= 0 && strings.HasPrefix(curLine, lastTabPrefix) && strings.HasSuffix(curLine, lastTabSuffix)
-			if cycleActive && len(lastTabCands) > 0 {
-				// Accept currently selected TAB suggestion instead of executing
-				sel := lastTabCands[lastTabIdx]
-				p := []rune(lastTabPrefix)
-				s := []rune(lastTabSuffix)
-				r := []rune(sel)
-				buf = append(append(p, r...), s...)
-				cursor = len(p) + len(r)
-				clearSuggestionList()
-				// Reset cycle state to avoid stale ghosts
-				lastTabCands = nil
-				lastTabIdx = -1
-				lastTabPrefix = ""
-				lastTabSuffix = ""
-				lastTabStart, lastTabEnd = 0, 0
-				suppressGhostUntilInput = true
+		i := 0
+		for i < n {
+			b := readKey[i]
+			// Detect bracketed paste markers first
+			if i+5 < n && b == 27 && readKey[i+1] == '[' && readKey[i+2] == '2' && readKey[i+3] == '0' && readKey[i+4] == '0' && readKey[i+5] == '~' {
+				inPaste = true
+				i += 6
+				continue
+			}
+			if i+5 < n && b == 27 && readKey[i+1] == '[' && readKey[i+2] == '2' && readKey[i+3] == '0' && readKey[i+4] == '1' && readKey[i+5] == '~' {
+				inPaste = false
+				i += 6
 				render()
 				continue
 			}
-			if cursor == len(buf) && ghostCache != "" {
-				// Accept ghost suggestion instead of executing
-				ins := []rune(ghostCache)
-				buf = append(buf, ins...)
-				cursor = len(buf)
-				ghostCache = ""
-				clearSuggestionList()
-				// Reset cycle state
-				lastTabCands = nil
-				lastTabIdx = -1
-				lastTabPrefix = ""
-				lastTabSuffix = ""
-				lastTabStart, lastTabEnd = 0, 0
-				suppressGhostUntilInput = true
-				render()
+
+			if inPaste {
+				// During paste, insert bytes literally, mapping CR to LF
+				if b == '\r' {
+					b = '\n'
+				}
+				if b >= 32 && b <= 126 || b == '\n' || b == '\t' {
+					r := rune(b)
+					buf = append(buf[:cursor], append([]rune{r}, buf[cursor:]...)...)
+					cursor++
+					// cancel any TAB cycle
+					lastTabCands = nil
+					lastTabIdx = -1
+					clearSuggestionList()
+					suppressGhostUntilInput = false
+					render()
+				}
+				i++
 				continue
 			}
-			// Submit line
-			line := string(buf)
-			// Clear overlay before printing a new line
-			clearSuggestionList()
-			os.Stdout.WriteString("\r\n")
-			if strings.TrimSpace(line) != "" {
-				if line == "exit" || line == "quit" {
-					return
-				}
-				// Only record if not a consecutive duplicate
-				if len(history) == 0 || history[len(history)-1] != line {
-					history = append(history, line)
-					// Persist command into history file
-					if historyFile != nil {
-						_, _ = historyFile.WriteString(line + "\n")
-					}
-				}
-				// Always reset navigation
-				histIdx = -1
-				stdout, stderr, evalErr := session.Evaluate(line, 15*time.Second)
-				if stdout != "" {
-					os.Stdout.WriteString(normalizeTTYNewlines(stdout))
-					if !strings.HasSuffix(stdout, "\n") && !strings.HasSuffix(stdout, "\r\n") {
-						os.Stdout.WriteString("\r\n")
-					}
-				}
-				if stderr != "" {
-					os.Stderr.WriteString(normalizeTTYNewlines(stderr))
-					if !strings.HasSuffix(stderr, "\n") && !strings.HasSuffix(stderr, "\r\n") {
-						os.Stderr.WriteString("\r\n")
-					}
-				}
-				if evalErr != nil {
-					msg := evalErr.Error()
-					if msg != "" {
-						os.Stderr.WriteString(normalizeTTYNewlines(msg))
-						if !strings.HasSuffix(msg, "\n") && !strings.HasSuffix(msg, "\r\n") {
-							os.Stderr.WriteString("\r\n")
+
+			// Handle CSI (ESC [ X) if fully present in this chunk
+			if b == 27 {
+				if i+2 < n && readKey[i+1] == '[' {
+					c := readKey[i+2]
+					switch c {
+					case 'C': // right
+						// Disable mid-line navigation in multiline mode
+						if strings.Contains(string(buf), "\n") {
+							i += 3
+							continue
 						}
-					}
-				}
-			}
-			buf = buf[:0]
-			cursor = 0
-			// reset TAB cycle and ghost
-			lastTabCands = nil
-			lastTabIdx = -1
-			// lastTabInput removed
-			ghostCache = ""
-			if pendingRefresh {
-				pendingRefresh = false
-			}
-			render()
-		case 127, 8: // backspace
-			if cursor > 0 {
-				buf = append(buf[:cursor-1], buf[cursor:]...)
-				cursor--
-				// any edit cancels TAB cycle
-				lastTabCands = nil
-				lastTabIdx = -1
-				// lastTabInput removed
-				clearSuggestionList()
-				render()
-			}
-		case 9: // TAB
-			// User is actively requesting suggestions again; allow ghost
-			suppressGhostUntilInput = false
-			line := string(buf)
-			// TAB should not accept or suggest history; prefer index candidates over function ghosts.
-			// Determine cycle state and current index candidates.
-			cycleActive := lastTabIdx >= 0 && strings.HasPrefix(line, lastTabPrefix) && strings.HasSuffix(line, lastTabSuffix)
+						if cursor < len(buf) {
+							cursor++
+							lastTabCands = nil
+							lastTabIdx = -1
+							clearSuggestionList()
+							render()
+						} else if ghostCache != "" {
+							// Accept ghost suggestion at EOL
+							ins := []rune(ghostCache)
+							buf = append(buf, ins...)
+							cursor = len(buf)
+							ghostCache = ""
+							// Clear any visible list once ghost is accepted
+							clearSuggestionList()
+							// Reset cycle state to avoid stale ghosts
+							lastTabCands = nil
+							lastTabIdx = -1
+							lastTabPrefix = ""
+							lastTabSuffix = ""
+							lastTabStart, lastTabEnd = 0, 0
+							suppressGhostUntilInput = true
+							render()
+						} else if lastTabIdx >= 0 && len(lastTabCands) > 0 {
+							// Accept currently selected suggestion even if ghost is hidden (e.g., attribute level)
+							line := string(buf)
+							_ = line
+							sel := lastTabCands[lastTabIdx]
+							p := []rune(lastTabPrefix)
+							s := []rune(lastTabSuffix)
+							r := []rune(sel)
+							buf = append(append(p, r...), s...)
+							cursor = len(p) + len(r)
+							clearSuggestionList()
+							// Reset cycle state to avoid stale ghosts
+							lastTabCands = nil
+							lastTabIdx = -1
+							lastTabPrefix = ""
+							lastTabSuffix = ""
+							lastTabStart, lastTabEnd = 0, 0
+							suppressGhostUntilInput = true
+							render()
+						}
+					case 'D': // left
+						if strings.Contains(string(buf), "\n") {
+							i += 3
+							continue
+						}
+						if cursor > 0 {
+							cursor--
+						}
+						clearSuggestionList()
+						render()
+					case 'A': // up - history prev
+						if len(history) > 0 {
+							if histIdx == -1 {
+								histIdx = len(history)
+							}
+							if histIdx > 0 {
+								histIdx--
+							}
+							buf = []rune(history[histIdx])
+							cursor = len(buf)
+						}
+						clearSuggestionList()
+						render()
+					case 'B': // down - history next
+						if histIdx >= 0 {
+							histIdx++
+							if histIdx >= len(history) {
+								histIdx = -1
+								buf = buf[:0]
+							} else {
+								buf = []rune(history[histIdx])
+							}
+							cursor = len(buf)
+						}
+						clearSuggestionList()
+						render()
+					case 'Z': // Shift+TAB (reverse cycle)
+						// Mirror TAB behavior but cycle backward. Do not modify the buffer
+						// (other than inserting a common prefix on first activation).
+						if strings.Contains(string(buf), "\n") {
+							// disable reverse cycling in multiline
+							render()
+							i += 3
+							continue
+						}
+						suppressGhostUntilInput = false
+						line := string(buf)
+						cycleActive := lastTabIdx >= 0 && strings.HasPrefix(line, lastTabPrefix) && strings.HasSuffix(line, lastTabSuffix)
 
-			var cands []string
-			var start, end int
-			if cycleActive && len(lastTabCands) > 0 {
-				// Reuse previous candidate set and token bounds so TAB truly cycles
-				cands = lastTabCands
-				start, end = lastTabStart, lastTabEnd
-			} else {
-				cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
-				// Do not trigger a synchronous index rebuild on TAB; return fast for UX responsiveness
-			}
+						var cands []string
+						var start, end int
+						if cycleActive && len(lastTabCands) > 0 {
+							cands = lastTabCands
+							start, end = lastTabStart, lastTabEnd
+						} else {
+							cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
+							if len(cands) == 0 {
+								os.Stdout.WriteString("\a")
+								render()
+								i += 3
+								continue
+							}
+							// Initialize cycle and optionally insert common prefix among candidates
+							lastTabCands = cands
+							common := cands[0]
+							for _, c2 := range cands[1:] {
+								for len(common) > 0 && (len(c2) < len(common) || c2[:len(common)] != common) {
+									common = common[:len(common)-1]
+								}
+							}
+							tok := line[start:end]
+							prefixStr := line[:start]
+							suffixStr := line[end:]
+							if common != "" && common != tok {
+								pRunes := []rune(prefixStr)
+								rRunes := []rune(common)
+								sRunes := []rune(suffixStr)
+								buf = append(append(pRunes, rRunes...), sRunes...)
+								cursor = len(pRunes) + len(rRunes)
+								lastTabStart = len(prefixStr)
+								lastTabEnd = lastTabStart + len(common)
+								lastTabPrefix = prefixStr
+								lastTabSuffix = suffixStr
+							} else {
+								lastTabStart, lastTabEnd = start, end
+								lastTabPrefix = prefixStr
+								lastTabSuffix = suffixStr
+							}
+							// Start from the last candidate for reverse cycling
+							lastTabIdx = len(lastTabCands) - 1
+						}
 
-			// If not cycling and at EOL, only accept a function ghost when there are no index candidates.
-			if !cycleActive && cursor == len(buf) && len(index.Functions) > 0 && len(cands) == 0 {
-				// Recompute function ghost like in render(), to avoid accepting history ghosts
-				i := len(line)
-				startTok := i
-				for startTok > 0 {
-					r := rune(line[startTok-1])
-					if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-						startTok--
+						if cycleActive && len(lastTabCands) > 0 {
+							// Move backward in the cycle
+							lastTabIdx--
+							if lastTabIdx < 0 {
+								lastTabIdx = len(lastTabCands) - 1
+							}
+						}
+
+						// Draw list overlay similar to TAB without inserting selection
+						if len(lastTabCands) > 0 {
+							sel := lastTabCands[lastTabIdx]
+							attrLevel := strings.Count(sel, ".") >= 2
+							if attrLevel {
+								clearSuggestionList()
+							} else if len(lastTabCands) > 1 {
+								lastTabListRows = printCandidatesOverwrite(lastTabCands, lastTabIdx, lastTabListRows)
+							}
+						}
+						render()
+						i++
 						continue
 					}
-					break
+					// consume ESC [ X
+					i += 3
+					continue
 				}
-				tok := line[startTok:i]
-				fghost := ""
-				if tok != "" && (startTok == 0 || line[startTok-1] != '.') {
-					lt := strings.ToLower(tok)
-					for _, fn := range index.Functions {
-						if strings.HasPrefix(fn, lt) {
-							if fn == lt {
-								fghost = "("
-							} else {
-								fghost = fn[len(lt):] + "("
-							}
-							break
-						}
-					}
-				}
-				if fghost != "" {
-					ins := []rune(fghost)
-					buf = append(buf, ins...)
-					cursor = len(buf)
-					// Do not start a cycle; keep functions out of lists
+				// Partial/unknown ESC sequence in this chunk: ignore gracefully
+				i++
+				continue
+			}
+			switch b {
+			case 3: // Ctrl+C — behave like Bash: clear current input and show a fresh prompt
+				os.Stdout.WriteString("\r\n")
+				buf = buf[:0]
+				cursor = 0
+				histIdx = -1
+				render()
+				i++
+				continue
+			case 4: // Ctrl+D
+				os.Stdout.WriteString("\r\n[exit]\r\n")
+				return
+			case '\r', '\n':
+				// If TAB cycle is active, ENTER accepts the selected suggestion (no execute).
+				// Otherwise, if a ghost suggestion exists at EOL, accept it (no execute).
+				// If we are in bracketed paste (handled above), newlines are already inserted.
+				// Here, treat as submit.
+				// Else: treat as submit/enter
+				curLine := string(buf)
+				cycleActive := lastTabIdx >= 0 && strings.HasPrefix(curLine, lastTabPrefix) && strings.HasSuffix(curLine, lastTabSuffix)
+				if cycleActive && len(lastTabCands) > 0 {
+					// Accept currently selected TAB suggestion instead of executing
+					sel := lastTabCands[lastTabIdx]
+					p := []rune(lastTabPrefix)
+					s := []rune(lastTabSuffix)
+					r := []rune(sel)
+					buf = append(append(p, r...), s...)
+					cursor = len(p) + len(r)
+					clearSuggestionList()
+					// Reset cycle state to avoid stale ghosts
 					lastTabCands = nil
 					lastTabIdx = -1
 					lastTabPrefix = ""
 					lastTabSuffix = ""
 					lastTabStart, lastTabEnd = 0, 0
-					clearSuggestionList()
 					suppressGhostUntilInput = true
 					render()
+					i++
 					continue
 				}
-			}
-
-			if len(cands) == 0 {
-				// No matches; return quickly and silently
-				os.Stdout.WriteString("\a")
-				render()
-				continue
-			}
-
-			// If first time or context changed, initialize cycle state
-			if !cycleActive {
-				// Initialize cycle and insert the common prefix shared by all candidates (if any)
-				lastTabCands = cands
-				// Compute longest common prefix among candidates
-				common := cands[0]
-				for _, c := range cands[1:] {
-					for len(common) > 0 && (len(c) < len(common) || c[:len(common)] != common) {
-						common = common[:len(common)-1]
-					}
-				}
-				// Current token text
-				tok := line[start:end]
-				prefixStr := line[:start]
-				suffixStr := line[end:]
-				if common != "" && common != tok {
-					// Replace token with common prefix
-					pRunes := []rune(prefixStr)
-					rRunes := []rune(common)
-					sRunes := []rune(suffixStr)
-					buf = append(append(pRunes, rRunes...), sRunes...)
-					cursor = len(pRunes) + len(rRunes)
-					// Update token bounds after insertion
-					lastTabStart = len(prefixStr)
-					lastTabEnd = lastTabStart + len(common)
-					lastTabPrefix = prefixStr
-					lastTabSuffix = suffixStr
-				} else {
-					// No extra commonality; keep bounds as-is
-					lastTabStart, lastTabEnd = start, end
-					lastTabPrefix = prefixStr
-					lastTabSuffix = suffixStr
-				}
-				lastTabIdx = 0
-			} else {
-				// advance cycle
-				lastTabIdx++
-				if lastTabIdx >= len(lastTabCands) {
-					lastTabIdx = 0
-				}
-			}
-			// Keep buffer unchanged and only render ghost for all levels
-			sel := lastTabCands[lastTabIdx]
-			_ = sel
-			// keep lastTabInput removed; we now track stability via prefix/suffix containment
-			// Draw list unless we're at attribute level (type.name.attr*), where list should be hidden
-			if len(lastTabCands) > 0 {
-				attrLevel := strings.Count(sel, ".") >= 2
-				if attrLevel {
+				if cursor == len(buf) && ghostCache != "" {
+					// Accept ghost suggestion instead of executing
+					ins := []rune(ghostCache)
+					buf = append(buf, ins...)
+					cursor = len(buf)
+					ghostCache = ""
 					clearSuggestionList()
-				} else if len(lastTabCands) > 1 {
-					// Draw suggestions on a virtual overlay line without moving the prompt
-					lastTabListRows = printCandidatesOverwrite(lastTabCands, lastTabIdx, lastTabListRows)
+					// Reset cycle state
+					lastTabCands = nil
+					lastTabIdx = -1
+					lastTabPrefix = ""
+					lastTabSuffix = ""
+					lastTabStart, lastTabEnd = 0, 0
+					suppressGhostUntilInput = true
+					render()
+					i++
+					continue
 				}
-			}
-			render()
-		case 27: // ESC sequence
-			// Read next two bytes for CSI if available
-			nn, _ := tty.Read(readKey[1:3])
-			if nn >= 2 && readKey[1] == '[' {
-				switch readKey[2] {
-				case 'C': // right
-					if cursor < len(buf) {
-						cursor++
-						lastTabCands = nil
-						lastTabIdx = -1
-						clearSuggestionList()
-					} else if ghostCache != "" {
-						// Accept ghost suggestion at EOL
-						ins := []rune(ghostCache)
-						buf = append(buf, ins...)
-						cursor = len(buf)
-						ghostCache = ""
-						// Clear any visible list once ghost is accepted
-						clearSuggestionList()
-						// Reset cycle state to avoid stale ghosts
-						lastTabCands = nil
-						lastTabIdx = -1
-						lastTabPrefix = ""
-						lastTabSuffix = ""
-						lastTabStart, lastTabEnd = 0, 0
-						suppressGhostUntilInput = true
-					} else if lastTabIdx >= 0 && len(lastTabCands) > 0 {
-						// Accept currently selected suggestion even if ghost is hidden (e.g., attribute level)
-						line := string(buf)
-						_ = line
-						sel := lastTabCands[lastTabIdx]
-						p := []rune(lastTabPrefix)
-						s := []rune(lastTabSuffix)
-						r := []rune(sel)
-						buf = append(append(p, r...), s...)
-						cursor = len(p) + len(r)
-						clearSuggestionList()
-						// Reset cycle state to avoid stale ghosts
-						lastTabCands = nil
-						lastTabIdx = -1
-						lastTabPrefix = ""
-						lastTabSuffix = ""
-						lastTabStart, lastTabEnd = 0, 0
-						suppressGhostUntilInput = true
+				// Submit line
+				line := string(buf)
+				// Clear overlay before printing a new line
+				clearSuggestionList()
+				os.Stdout.WriteString("\r\n")
+				normalized := normalizeInputForEval(line)
+				if strings.TrimSpace(normalized) != "" {
+					if normalized == "exit" || normalized == "quit" {
+						return
 					}
-				case 'D': // left
-					if cursor > 0 {
-						cursor--
+					// Only record if not a consecutive duplicate
+					if len(history) == 0 || history[len(history)-1] != normalized {
+						history = append(history, normalized)
+						// Persist command into history file
+						if historyFile != nil {
+							_, _ = historyFile.WriteString(normalized + "\n")
+						}
 					}
-					clearSuggestionList()
-				case 'A': // up - history prev
-					if len(history) > 0 {
-						if histIdx == -1 {
-							histIdx = len(history)
+					// Always reset navigation
+					histIdx = -1
+					stdout, stderr, evalErr := session.Evaluate(normalized, 15*time.Second)
+					if stdout != "" {
+						os.Stdout.WriteString(normalizeTTYNewlines(stdout))
+						if !strings.HasSuffix(stdout, "\n") && !strings.HasSuffix(stdout, "\r\n") {
+							os.Stdout.WriteString("\r\n")
 						}
-						if histIdx > 0 {
-							histIdx--
-						}
-						buf = []rune(history[histIdx])
-						cursor = len(buf)
 					}
-				case 'B': // down - history next
-					if histIdx >= 0 {
-						histIdx++
-						if histIdx >= len(history) {
-							histIdx = -1
-							buf = buf[:0]
-						} else {
-							buf = []rune(history[histIdx])
+					if stderr != "" {
+						os.Stderr.WriteString(normalizeTTYNewlines(stderr))
+						if !strings.HasSuffix(stderr, "\n") && !strings.HasSuffix(stderr, "\r\n") {
+							os.Stderr.WriteString("\r\n")
 						}
-						cursor = len(buf)
 					}
-				case 'Z': // Shift+TAB (reverse cycle)
-					// Mirror TAB behavior but cycle backward. Do not modify the buffer
-					// (other than inserting a common prefix on first activation).
-					suppressGhostUntilInput = false
-					line := string(buf)
-					cycleActive := lastTabIdx >= 0 && strings.HasPrefix(line, lastTabPrefix) && strings.HasSuffix(line, lastTabSuffix)
-
-					var cands []string
-					var start, end int
-					if cycleActive && len(lastTabCands) > 0 {
-						cands = lastTabCands
-						start, end = lastTabStart, lastTabEnd
-					} else {
-						cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
-						if len(cands) == 0 {
-							os.Stdout.WriteString("\a")
-							render()
-							break
-						}
-						// Initialize cycle and optionally insert common prefix among candidates
-						lastTabCands = cands
-						common := cands[0]
-						for _, c := range cands[1:] {
-							for len(common) > 0 && (len(c) < len(common) || c[:len(common)] != common) {
-								common = common[:len(common)-1]
+					if evalErr != nil {
+						msg := evalErr.Error()
+						if msg != "" {
+							os.Stderr.WriteString(normalizeTTYNewlines(msg))
+							if !strings.HasSuffix(msg, "\n") && !strings.HasSuffix(msg, "\r\n") {
+								os.Stderr.WriteString("\r\n")
 							}
 						}
-						tok := line[start:end]
-						prefixStr := line[:start]
-						suffixStr := line[end:]
-						if common != "" && common != tok {
-							pRunes := []rune(prefixStr)
-							rRunes := []rune(common)
-							sRunes := []rune(suffixStr)
-							buf = append(append(pRunes, rRunes...), sRunes...)
-							cursor = len(pRunes) + len(rRunes)
-							lastTabStart = len(prefixStr)
-							lastTabEnd = lastTabStart + len(common)
-							lastTabPrefix = prefixStr
-							lastTabSuffix = suffixStr
-						} else {
-							lastTabStart, lastTabEnd = start, end
-							lastTabPrefix = prefixStr
-							lastTabSuffix = suffixStr
-						}
-						// Start from the last candidate for reverse cycling
-						lastTabIdx = len(lastTabCands) - 1
 					}
-
-					if cycleActive && len(lastTabCands) > 0 {
-						// Move backward in the cycle
-						lastTabIdx--
-						if lastTabIdx < 0 {
-							lastTabIdx = len(lastTabCands) - 1
-						}
-					}
-
-					// Draw list overlay similar to TAB without inserting selection
-					if len(lastTabCands) > 0 {
-						sel := lastTabCands[lastTabIdx]
-						attrLevel := strings.Count(sel, ".") >= 2
-						if attrLevel {
-							clearSuggestionList()
-						} else if len(lastTabCands) > 1 {
-							lastTabListRows = printCandidatesOverwrite(lastTabCands, lastTabIdx, lastTabListRows)
-						}
-					}
-					render()
 				}
-				render()
-			}
-		default:
-			// Printable characters
-			if b >= 32 && b <= 126 {
-				// insert
-				r := rune(b)
-				buf = append(buf[:cursor], append([]rune{r}, buf[cursor:]...)...)
-				cursor++
-				// any edit cancels TAB cycle
+				buf = buf[:0]
+				cursor = 0
+				// reset TAB cycle and ghost
 				lastTabCands = nil
 				lastTabIdx = -1
-				clearSuggestionList()
-				suppressGhostUntilInput = false
+				// lastTabInput removed
+				ghostCache = ""
+				if pendingRefresh {
+					pendingRefresh = false
+				}
+				// After submitting, avoid clearing printed evaluation output in next render
+				lastMultilineRows = 0
 				render()
+				i++
+				continue
+			case 127, 8: // backspace
+				if cursor > 0 {
+					buf = append(buf[:cursor-1], buf[cursor:]...)
+					cursor--
+					// any edit cancels TAB cycle
+					lastTabCands = nil
+					lastTabIdx = -1
+					// lastTabInput removed
+					clearSuggestionList()
+					render()
+				}
+				i++
+				continue
+			case 9: // TAB
+				// User is actively requesting suggestions again; allow ghost
+				suppressGhostUntilInput = false
+				line := string(buf)
+				if strings.Contains(line, "\n") {
+					// Disable TAB completion in multiline mode
+					os.Stdout.WriteString("\a")
+					render()
+					i++
+					continue
+				}
+				// TAB should not accept or suggest history; prefer index candidates over function ghosts.
+				// Determine cycle state and current index candidates.
+				cycleActive := lastTabIdx >= 0 && strings.HasPrefix(line, lastTabPrefix) && strings.HasSuffix(line, lastTabSuffix)
+
+				var cands []string
+				var start, end int
+				if cycleActive && len(lastTabCands) > 0 {
+					// Reuse previous candidate set and token bounds so TAB truly cycles
+					cands = lastTabCands
+					start, end = lastTabStart, lastTabEnd
+				} else {
+					cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
+					// Do not trigger a synchronous index rebuild on TAB; return fast for UX responsiveness
+				}
+
+				// If not cycling and at EOL, only accept a function ghost when there are no index candidates.
+				if !cycleActive && cursor == len(buf) && len(index.Functions) > 0 && len(cands) == 0 {
+					// Recompute function ghost like in render(), to avoid accepting history ghosts
+					i := len(line)
+					startTok := i
+					for startTok > 0 {
+						r := rune(line[startTok-1])
+						if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+							startTok--
+							continue
+						}
+						break
+					}
+					tok := line[startTok:i]
+					fghost := ""
+					if tok != "" && (startTok == 0 || line[startTok-1] != '.') {
+						lt := strings.ToLower(tok)
+						for _, fn := range index.Functions {
+							if strings.HasPrefix(fn, lt) {
+								if fn == lt {
+									fghost = "("
+								} else {
+									fghost = fn[len(lt):] + "("
+								}
+								break
+							}
+						}
+					}
+					if fghost != "" {
+						ins := []rune(fghost)
+						buf = append(buf, ins...)
+						cursor = len(buf)
+						// Do not start a cycle; keep functions out of lists
+						lastTabCands = nil
+						lastTabIdx = -1
+						lastTabPrefix = ""
+						lastTabSuffix = ""
+						lastTabStart, lastTabEnd = 0, 0
+						clearSuggestionList()
+						suppressGhostUntilInput = true
+						render()
+						i++
+						continue
+					}
+				}
+
+				if len(cands) == 0 {
+					// No matches; return quickly and silently
+					os.Stdout.WriteString("\a")
+					render()
+					i++
+					continue
+				}
+
+				// If first time or context changed, initialize cycle state
+				if !cycleActive {
+					// Initialize cycle and insert the common prefix shared by all candidates (if any)
+					lastTabCands = cands
+					// Compute longest common prefix among candidates
+					common := cands[0]
+					for _, c := range cands[1:] {
+						for len(common) > 0 && (len(c) < len(common) || c[:len(common)] != common) {
+							common = common[:len(common)-1]
+						}
+					}
+					// Current token text
+					tok := line[start:end]
+					prefixStr := line[:start]
+					suffixStr := line[end:]
+					if common != "" && common != tok {
+						// Replace token with common prefix
+						pRunes := []rune(prefixStr)
+						rRunes := []rune(common)
+						sRunes := []rune(suffixStr)
+						buf = append(append(pRunes, rRunes...), sRunes...)
+						cursor = len(pRunes) + len(rRunes)
+						// Update token bounds after insertion
+						lastTabStart = len(prefixStr)
+						lastTabEnd = lastTabStart + len(common)
+						lastTabPrefix = prefixStr
+						lastTabSuffix = suffixStr
+					} else {
+						// No extra commonality; keep bounds as-is
+						lastTabStart, lastTabEnd = start, end
+						lastTabPrefix = prefixStr
+						lastTabSuffix = suffixStr
+					}
+					lastTabIdx = 0
+				} else {
+					// advance cycle
+					lastTabIdx++
+					if lastTabIdx >= len(lastTabCands) {
+						lastTabIdx = 0
+					}
+				}
+				// Keep buffer unchanged and only render ghost for all levels
+				sel := lastTabCands[lastTabIdx]
+				_ = sel
+				// keep lastTabInput removed; we now track stability via prefix/suffix containment
+				// Draw list unless we're at attribute level (type.name.attr*), where list should be hidden
+				if len(lastTabCands) > 0 {
+					attrLevel := strings.Count(sel, ".") >= 2
+					if attrLevel {
+						clearSuggestionList()
+					} else if len(lastTabCands) > 1 {
+						// Draw suggestions on a virtual overlay line without moving the prompt
+						lastTabListRows = printCandidatesOverwrite(lastTabCands, lastTabIdx, lastTabListRows)
+					}
+				}
+				render()
+				i++
+				continue
+			case 27:
+				// already handled above (complete ESC sequences). If we get here, skip.
+				i++
+				continue
+			default:
+				// Printable characters
+				if b >= 32 && b <= 126 {
+					// insert
+					r := rune(b)
+					buf = append(buf[:cursor], append([]rune{r}, buf[cursor:]...)...)
+					cursor++
+					// any edit cancels TAB cycle
+					lastTabCands = nil
+					lastTabIdx = -1
+					clearSuggestionList()
+					suppressGhostUntilInput = false
+					render()
+				}
+				i++
+				continue
 			}
 		}
 	}
@@ -788,4 +928,16 @@ func byteOffsetOfRuneIndex(s string, runeIndex int) int {
 		return len(s)
 	}
 	return runeIndex
+}
+
+// normalizeInputForEval replaces CR, LF, and TAB with spaces and trims edges.
+func normalizeInputForEval(s string) string {
+	if s == "" {
+		return s
+	}
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	return strings.TrimSpace(s)
 }
