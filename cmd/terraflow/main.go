@@ -12,14 +12,14 @@ import (
 const version = "0.1.0"
 
 func printHelp() {
-	fmt.Print(`Terraflow: Real-time development tool for Terraform and OpenTofu
+	fmt.Print(`Terraflow is a real-time development solution for Terraform and OpenTofu.
 
-Usage:
-  terraflow [command] [options]
+Usage: terraflow [global options] <subcommand> [args]
 
-Available Commands:
-  help       Show this help message and exit
-  version    Show version information and exit
+Available commands:
+  help     Show this help output, or the help for a specified subcommand
+  version  Show the current Terraflow version
+  console  Try Terraform expressions at an interactive command prompt
 `)
 }
 
@@ -36,7 +36,7 @@ func main() {
 	}
 
 	if args[0] == "version" {
-		fmt.Println("terraflow version", version)
+		fmt.Println("Terraflow", version)
 		os.Exit(0)
 	}
 

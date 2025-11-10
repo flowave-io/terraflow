@@ -44,8 +44,3 @@ resource "null_resource" "dummy" {
 
   depends_on = [time_sleep.waits]
 }
-
-variable "some_var123" {
-  type    = string
-  default = "initial12311"
-}

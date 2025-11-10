@@ -54,7 +54,7 @@ func TestCompletionCandidates_CategoryStarters_EmptyIndex(t *testing.T) {
 	for _, prefix := range []string{"m", "mo", "mod", "v", "l", "d", "o"} {
 		cands, _, _ := idx.CompletionCandidates(prefix, len(prefix))
 		for _, c := range cands {
-			if c == "module." || c == "var." || c == "local." || c == "data." || c == "output." {
+			if c == "module." || c == "var." || c == "local." || c == "data." {
 				t.Fatalf("unexpected starter %q for empty index with prefix %q: %#v", c, prefix, cands)
 			}
 		}
@@ -76,7 +76,6 @@ func TestCompletionCandidates_CategoryStarters_NonEmptyIndex(t *testing.T) {
 		"l": "local.",
 		"m": "module.",
 		"d": "data.",
-		"o": "output.",
 	}
 	for prefix, want := range cases {
 		cands, _, _ := idx.CompletionCandidates(prefix, len(prefix))

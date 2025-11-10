@@ -31,18 +31,48 @@ func (m *multiStringFlag) Set(v string) error {
 func RunConsoleCommand(args []string) {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.SetOutput(os.Stdout)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), `Usage: terraflow [global options] console [options]
+
+  Starts an interactive console for experimenting with Terraform
+  interpolations.
+
+  This will open an interactive console that you can use to type
+  interpolations into and inspect their values. This lets you explore 
+  and test interpolations before using them in future configurations.
+
+Options:
+
+  -backend-config=path  Configuration to be merged with what is in the
+                        configuration file's 'backend' block. This can be
+                        either a path to an HCL file with key/value
+                        assignments (same format as terraform.tfvars) or a
+                        'key=value' format, and can be specified multiple
+                        times. The backend type must be in the configuration
+                        itself.
+
+  -pull-remote-state    Pull the state from its location.
+
+  -var-file=path        Set variables in the Terraform configuration from
+                        a file. If "terraform.tfvars" or any ".auto.tfvars"
+                        files are present, they will be automatically loaded.
+`)
+	}
 	// Support multiple -var-file flags similar to Terraform
 	var varFiles multiStringFlag
 	fs.Var(&varFiles, "var-file", "Path to a .tfvars file (repeatable). Passed through to terraform console.")
 	// Support partial backend configuration like Terraform's -backend-config (repeatable)
 	var backendConfigs multiStringFlag
 	fs.Var(&backendConfigs, "backend-config", "Partial backend config (KEY=VALUE or file). Repeatable. Triggers terraform init.")
-	pullRemoteState := fs.Bool("pull-remote-state", false, "Pull remote state once and reuse locally in .terraflow/")
+	pullRemoteState := fs.Bool("pull-remote-state", false, "Pull remote state")
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			os.Exit(0)
+		}
 		os.Exit(2)
 	}
 
-	log.Println("Starting terraflow console (TAB completion, history; auto-refresh on .tf/.tfvars)")
+	log.Println("Starting terraflow console...")
 
 	cwd, _ := os.Getwd()
 	scratchDir := filepath.Join(cwd, ".terraflow")

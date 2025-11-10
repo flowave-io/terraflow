@@ -394,13 +394,11 @@ func (s *SymbolIndex) CompletionCandidates(line string, cursorIndex int) (candid
 		token, lower = "local.", "local."
 	case "module":
 		token, lower = "module.", "module."
-	case "output":
-		token, lower = "output.", "output."
 	case "data":
 		token, lower = "data.", "data."
 	}
 
-	// Patterns: var., local., module., data., output., <type>., data.<type>., type.name.
+	// Patterns: var., local., module., data., <type>., data.<type>., type.name.
 	switch {
 	case strings.HasPrefix(lower, "var."):
 		prefix := token[len("var."):]
@@ -421,13 +419,6 @@ func (s *SymbolIndex) CompletionCandidates(line string, cursorIndex int) (candid
 		for _, v := range s.Modules {
 			if strings.HasPrefix(v, prefix) {
 				candidates = append(candidates, "module."+v)
-			}
-		}
-	case strings.HasPrefix(lower, "output."):
-		prefix := token[len("output."):]
-		for _, v := range s.Outputs {
-			if strings.HasPrefix(v, prefix) {
-				candidates = append(candidates, "output."+v)
 			}
 		}
 	case strings.HasPrefix(lower, "data."):
@@ -474,9 +465,6 @@ func (s *SymbolIndex) CompletionCandidates(line string, cursorIndex int) (candid
 			}
 			if len(s.DataSource) > 0 {
 				starters = append(starters, "data.")
-			}
-			if len(s.Outputs) > 0 {
-				starters = append(starters, "output.")
 			}
 			for _, kw := range starters {
 				if strings.HasPrefix(kw, kwPrefix) {

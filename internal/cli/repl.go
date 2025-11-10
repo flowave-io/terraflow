@@ -52,8 +52,8 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	lastTabPrefix := ""
 	lastTabSuffix := ""
 	lastTabListRows := 0
-	// Track how many additional visual lines we printed for multiline rendering
-	lastMultilineRows := 0
+	// Track how many visual rows were printed in the previous render (handles soft-wraps)
+	lastVisualRows := 0
 	// After accepting a suggestion, hide ghost until next user input
 	suppressGhostUntilInput := false
 	// cached ghost suggestion (history-based)
@@ -89,20 +89,51 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	// History candidates are no longer merged into TAB completion. We keep only index-based TAB suggestions.
 
 	render := func() {
-		// If the previous render printed multiple visual lines, move to the first line
-		if lastMultilineRows > 0 {
-			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastMultilineRows))
+		// If the previous render occupied multiple visual rows, move to the first of those rows
+		if lastVisualRows > 1 {
+			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastVisualRows-1))
 		}
-		// Clear current line and any previously printed continuation lines
-		// Clear first line
+		// Clear current row and any additional rows below that were used by the previous render
 		os.Stdout.WriteString("\r\x1b[2K")
-		// Clear additional lines below if any
-		if lastMultilineRows > 0 {
-			for r := 0; r < lastMultilineRows; r++ {
+		if lastVisualRows > 1 {
+			for r := 0; r < lastVisualRows-1; r++ {
 				os.Stdout.WriteString("\x1b[1B\r\x1b[2K")
 			}
-			// Return cursor to the first line
-			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastMultilineRows))
+			// Return cursor to the first row
+			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastVisualRows-1))
+		}
+
+		// Helper: compute how many terminal rows will be used by the current render,
+		// considering prompt/continuations and soft-wrapping at terminal width.
+		visualRowsFor := func(line, ghost string) int {
+			w := detectTermWidth(tty)
+			if w <= 0 {
+				w = 80
+			}
+			ceilDiv := func(a, b int) int {
+				if a <= 0 {
+					return 1
+				}
+				return (a + b - 1) / b
+			}
+			if strings.Contains(line, "\n") {
+				parts := strings.Split(line, "\n")
+				rows := 0
+				for i, seg := range parts {
+					prefixLen := len(prompt)
+					if i > 0 {
+						prefixLen = len(".. ")
+					}
+					rows += ceilDiv(prefixLen+len(seg), w)
+				}
+				if rows <= 0 {
+					rows = 1
+				}
+				return rows
+			}
+			// Single line: count prompt + content + ghost suggestion
+			total := len(prompt) + len(line) + len(ghost)
+			return ceilDiv(total, w)
 		}
 
 		// Render prompt and buffer
@@ -121,11 +152,10 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				os.Stdout.WriteString(seg)
 			}
 			ghostCache = ""
-			lastMultilineRows = len(parts) - 1
+			lastVisualRows = visualRowsFor(line, "")
 			return
 		}
-		// Not multiline anymore
-		lastMultilineRows = 0
+		// Not multiline; will compute visual rows after ghost calculation
 		// Write the current single-line buffer
 		os.Stdout.WriteString(line)
 
@@ -193,6 +223,8 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		if back > 0 {
 			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dD", back))
 		}
+		// Update visual rows for this render (single-line case)
+		lastVisualRows = visualRowsFor(line, ghost)
 	}
 
 	// Helper: clear any printed suggestion list below the prompt
@@ -428,6 +460,14 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			if i+5 < n && b == 27 && readKey[i+1] == '[' && readKey[i+2] == '2' && readKey[i+3] == '0' && readKey[i+4] == '1' && readKey[i+5] == '~' {
 				inPaste = false
 				i += 6
+				// On paste end, normalize multiline expressions by inserting commas
+				if strings.Contains(string(buf), "\n") {
+					s := NormalizeCommasInMultiline(string(buf))
+					if s != string(buf) {
+						buf = []rune(s)
+						cursor = len(buf)
+					}
+				}
 				render()
 				continue
 			}
@@ -446,7 +486,6 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 					lastTabIdx = -1
 					clearSuggestionList()
 					suppressGhostUntilInput = false
-					render()
 				}
 				i++
 				continue
@@ -557,8 +596,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 						var cands []string
 						var start, end int
 						if cycleActive && len(lastTabCands) > 0 {
-							cands = lastTabCands
-							start, end = lastTabStart, lastTabEnd
+							// reuse existing cycle state; nothing to initialize here
 						} else {
 							cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
 							if len(cands) == 0 {
@@ -616,7 +654,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 							}
 						}
 						render()
-						i++
+						i += 3
 						continue
 					}
 					// consume ESC [ X
@@ -629,7 +667,15 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			}
 			switch b {
 			case 3: // Ctrl+C — behave like Bash: clear current input and show a fresh prompt
+				clearSuggestionList()
 				os.Stdout.WriteString("\r\n")
+				// reset TAB cycle and ghost state to avoid stale overlays
+				lastTabCands = nil
+				lastTabIdx = -1
+				lastTabPrefix = ""
+				lastTabSuffix = ""
+				lastTabStart, lastTabEnd = 0, 0
+				suppressGhostUntilInput = false
 				buf = buf[:0]
 				cursor = 0
 				histIdx = -1
@@ -640,51 +686,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				os.Stdout.WriteString("\r\n[exit]\r\n")
 				return
 			case '\r', '\n':
-				// If TAB cycle is active, ENTER accepts the selected suggestion (no execute).
-				// Otherwise, if a ghost suggestion exists at EOL, accept it (no execute).
-				// If we are in bracketed paste (handled above), newlines are already inserted.
-				// Here, treat as submit.
-				// Else: treat as submit/enter
-				curLine := string(buf)
-				cycleActive := lastTabIdx >= 0 && strings.HasPrefix(curLine, lastTabPrefix) && strings.HasSuffix(curLine, lastTabSuffix)
-				if cycleActive && len(lastTabCands) > 0 {
-					// Accept currently selected TAB suggestion instead of executing
-					sel := lastTabCands[lastTabIdx]
-					p := []rune(lastTabPrefix)
-					s := []rune(lastTabSuffix)
-					r := []rune(sel)
-					buf = append(append(p, r...), s...)
-					cursor = len(p) + len(r)
-					clearSuggestionList()
-					// Reset cycle state to avoid stale ghosts
-					lastTabCands = nil
-					lastTabIdx = -1
-					lastTabPrefix = ""
-					lastTabSuffix = ""
-					lastTabStart, lastTabEnd = 0, 0
-					suppressGhostUntilInput = true
-					render()
-					i++
-					continue
-				}
-				if cursor == len(buf) && ghostCache != "" {
-					// Accept ghost suggestion instead of executing
-					ins := []rune(ghostCache)
-					buf = append(buf, ins...)
-					cursor = len(buf)
-					ghostCache = ""
-					clearSuggestionList()
-					// Reset cycle state
-					lastTabCands = nil
-					lastTabIdx = -1
-					lastTabPrefix = ""
-					lastTabSuffix = ""
-					lastTabStart, lastTabEnd = 0, 0
-					suppressGhostUntilInput = true
-					render()
-					i++
-					continue
-				}
+				// ENTER should always submit; do not accept suggestions or ghosts here.
 				// Submit line
 				line := string(buf)
 				// Clear overlay before printing a new line
@@ -695,12 +697,14 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 					if normalized == "exit" || normalized == "quit" {
 						return
 					}
+					// Prepare compact history entry from raw input to avoid indentation spaces
+					hist := NormalizeMultilineForHistory(line)
 					// Only record if not a consecutive duplicate
-					if len(history) == 0 || history[len(history)-1] != normalized {
-						history = append(history, normalized)
+					if len(history) == 0 || history[len(history)-1] != hist {
+						history = append(history, hist)
 						// Persist command into history file
 						if historyFile != nil {
-							_, _ = historyFile.WriteString(normalized + "\n")
+							_, _ = historyFile.WriteString(hist + "\n")
 						}
 					}
 					// Always reset navigation
@@ -739,7 +743,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 					pendingRefresh = false
 				}
 				// After submitting, avoid clearing printed evaluation output in next render
-				lastMultilineRows = 0
+				lastVisualRows = 0
 				render()
 				i++
 				continue
@@ -775,8 +779,6 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				var start, end int
 				if cycleActive && len(lastTabCands) > 0 {
 					// Reuse previous candidate set and token bounds so TAB truly cycles
-					cands = lastTabCands
-					start, end = lastTabStart, lastTabEnd
 				} else {
 					cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
 					// Do not trigger a synchronous index rebuild on TAB; return fast for UX responsiveness
@@ -828,7 +830,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 					}
 				}
 
-				if len(cands) == 0 {
+				if !cycleActive && len(cands) == 0 {
 					// No matches; return quickly and silently
 					os.Stdout.WriteString("\a")
 					render()
