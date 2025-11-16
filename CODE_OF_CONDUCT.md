@@ -6,8 +6,6 @@ We, as contributors and maintainers of Terraflow, pledge to make participation i
 
 We commit to fostering an open, welcoming, diverse, inclusive, and healthy environment where contributors can collaborate productively.
 
----
-
 ## Our Standards
 
 Positive behaviors include:
@@ -25,8 +23,6 @@ Unacceptable behavior includes:
 - Public or private harassment
 - Publishing private information without permission
 - Any conduct that would be inappropriate in a professional setting
-
----
 
 ## Enforcement Responsibilities
 
