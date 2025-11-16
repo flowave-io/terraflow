@@ -37,21 +37,15 @@ Project maintainers are responsible for:
 - Removing, editing, or rejecting comments, code, or contributions that violate this Code
 - Explaining moderation decisions when appropriate
 
----
-
 ## Scope
 
 This Code of Conduct applies to all Terraflow community spaces and public spaces where individuals represent Terraflow officially (such as events, online channels, or when using an official Terraflow email address).
-
----
 
 ## Reporting
 
 If you experience or see unacceptable behavior, or have any related concerns, you are encouraged to report it via email at **maxpeten@gmail.com**.
 
 All reports will be treated seriously, reviewed promptly, and handled with discretion.
-
----
 
 ## Enforcement Guidelines
 
