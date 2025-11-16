@@ -1,0 +1,67 @@
+name: Feature Request
+description: Suggest a new feature or other improvement.
+labels: ["enhancement", "new"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # Thank you for opening a feature request.
+
+        Use this form to suggest improvements to Terraflow development experience, or any aspect of how Terraflow responds as you work with Terraform.
+
+  - type: textarea
+    id: tfl-version
+    attributes:
+      label: Terraflow Version
+      description: Share your Terraflow version. If you're not on the latest version, consider upgrading first to see if something related to your request has already been implemented.
+      render: shell
+      placeholder: Paste `terraflow version` output here...
+      value:
+    validations:
+      required: true
+
+  - type: textarea
+    id: tf-version
+    attributes:
+      label: Terraform Version
+      description: Share your Terraform version. If you're not on the latest version, consider upgrading first to see if something related to your request has already been implemented.
+      render: shell
+      placeholder: Paste `terraform version` output here...
+      value:
+    validations:
+      required: true
+
+  - type: textarea
+    id: tfl-use-case
+    attributes:
+      label: Use Cases
+      description: |
+        Help us understand what you're trying to accomplish.
+      placeholder: Describe the problem or goal you're trying to achieve...
+      value:
+    validations:
+      required: true
+
+  - type: textarea
+    id: tfl-add-context
+    attributes:
+      label: Additional Context
+      description: Anything else we should know?
+      placeholder: Any additional context that might help...
+      value:
+    validations:
+      required: false
+
+  - type: textarea
+    id: tfl-references
+    attributes:
+      label: References
+      description: |
+        Link any related GitHub issues or Pull Requests:
+        ```
+          - #1234
+        ```
+      placeholder:
+      value:
+    validations:
+      required: false
