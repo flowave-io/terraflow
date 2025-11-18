@@ -395,7 +395,7 @@ func NormalizeMultilineForHistory(s string) string {
 	}
 	joined := strings.Join(out, " ")
 	// Compact spaces introduced at bracket boundaries:
-	// - remove spaces immediately after '(', '[', '{'
+	// - conditionally remove spaces immediately after '(', '[', '{'
 	// - remove spaces immediately before ')', ']', '}'
 	runes := []rune(joined)
 	if len(runes) == 0 {
@@ -409,12 +409,33 @@ func NormalizeMultilineForHistory(s string) string {
 	i := 0
 	for i < len(runes) {
 		r := runes[i]
-		// After an opener, skip any spaces/tabs
+		// After an opener:
+		// - For '[': preserve a single space if next token isn't a bracket/closer
+		// - For '(' and '{': drop spaces to compact boundaries
 		if isOpener(r) {
 			b = append(b, r)
-			i++
-			for i < len(runes) && isSpace(runes[i]) {
-				i++
+			i++ // move past opener
+			// Count spaces after opener
+			j := i
+			for j < len(runes) && isSpace(runes[j]) {
+				j++
+			}
+			if j < len(runes) {
+				n := runes[j]
+				if r == '[' {
+					// For lists, keep one space before the next non-bracket token
+					if isOpener(n) || isCloser(n) {
+						i = j
+					} else {
+						if j > i {
+							b = append(b, ' ')
+						}
+						i = j
+					}
+				} else {
+					// '(' or '{' — compact: drop spaces
+					i = j
+				}
 			}
 			continue
 		}

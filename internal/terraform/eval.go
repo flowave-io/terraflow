@@ -36,7 +36,7 @@ func EvalJSON(workDir, statePath string, varFiles []string, expr string, timeout
 		tmp := filepath.Join(filepath.Dir(statePath), ".tfstate-eval-"+time.Now().Format("20060102T150405.000000000"))
 		if err := copyFile(statePath, tmp, 0o600); err == nil {
 			snap = tmp
-			defer os.Remove(tmp)
+			defer func() { _ = os.Remove(tmp) }()
 		}
 	}
 	s := StartConsoleSession(workDir, snap, varFiles)

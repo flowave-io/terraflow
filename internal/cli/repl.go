@@ -10,6 +10,18 @@ import (
 	"github.com/flowave-io/terraflow/internal/terraform"
 )
 
+func writeStdout(s string) {
+	if _, err := os.Stdout.WriteString(s); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "stdout write error: %v\n", err)
+	}
+}
+
+func writeStderr(s string) {
+	if _, err := os.Stderr.WriteString(s); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "stderr write error: %v\n", err)
+	}
+}
+
 // RunREPL starts the interactive console loop with history and autocompletion.
 // Uses raw TTY on Unix to capture TAB and arrows; gracefully degrades otherwise.
 // scratchDir is the working directory used by terraform console (e.g., .terraflow).
@@ -22,7 +34,11 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		defer restore()
 	}
 	if tty != nil {
-		defer tty.Close()
+		defer func() {
+			if err := tty.Close(); err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "tty close error: %v\n", err)
+			}
+		}()
 	}
 
 	const prompt = ">> "
@@ -42,7 +58,11 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	// Open file for appending executed commands
 	historyFile, _ := os.OpenFile(historyPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if historyFile != nil {
-		defer historyFile.Close()
+		defer func() {
+			if err := historyFile.Close(); err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "history close error: %v\n", err)
+			}
+		}()
 	}
 	histIdx := -1 // -1 means not navigating
 	// TAB-cycle state
@@ -91,16 +111,16 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	render := func() {
 		// If the previous render occupied multiple visual rows, move to the first of those rows
 		if lastVisualRows > 1 {
-			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastVisualRows-1))
+			writeStdout(fmt.Sprintf("\x1b[%dA", lastVisualRows-1))
 		}
 		// Clear current row and any additional rows below that were used by the previous render
-		os.Stdout.WriteString("\r\x1b[2K")
+		writeStdout("\r\x1b[2K")
 		if lastVisualRows > 1 {
 			for r := 0; r < lastVisualRows-1; r++ {
-				os.Stdout.WriteString("\x1b[1B\r\x1b[2K")
+				writeStdout("\x1b[1B\r\x1b[2K")
 			}
 			// Return cursor to the first row
-			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastVisualRows-1))
+			writeStdout(fmt.Sprintf("\x1b[%dA", lastVisualRows-1))
 		}
 
 		// Helper: compute how many terminal rows will be used by the current render,
@@ -137,19 +157,19 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		}
 
 		// Render prompt and buffer
-		os.Stdout.WriteString(prompt)
+		writeStdout(prompt)
 		line := string(buf)
 		hasNL := strings.Contains(line, "\n")
 		if hasNL {
 			// Multiline mode: print with continuation prompt; disable ghosts and mid-line cursoring
 			parts := strings.Split(line, "\n")
 			if len(parts) > 0 {
-				os.Stdout.WriteString(parts[0])
+				writeStdout(parts[0])
 			}
 			for _, seg := range parts[1:] {
-				os.Stdout.WriteString("\r\n")
-				os.Stdout.WriteString(".. ")
-				os.Stdout.WriteString(seg)
+				writeStdout("\r\n")
+				writeStdout(".. ")
+				writeStdout(seg)
 			}
 			ghostCache = ""
 			lastVisualRows = visualRowsFor(line, "")
@@ -157,7 +177,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		}
 		// Not multiline; will compute visual rows after ghost calculation
 		// Write the current single-line buffer
-		os.Stdout.WriteString(line)
+		writeStdout(line)
 
 		// Inline ghost suggestion from selection or history (dim)
 		ghost := ""
@@ -208,9 +228,9 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		}
 		ghostCache = ghost
 		if ghost != "" {
-			os.Stdout.WriteString(ansiGhost)
-			os.Stdout.WriteString(ghost)
-			os.Stdout.WriteString(ansiReset)
+			writeStdout(ansiGhost)
+			writeStdout(ghost)
+			writeStdout(ansiReset)
 		}
 		// Move cursor back over any ghost and the tail from mid-line edits
 		// First account for ghost length if cursor is not at end
@@ -221,7 +241,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		tail := len(buf) - cursor
 		back += tail
 		if back > 0 {
-			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dD", back))
+			writeStdout(fmt.Sprintf("\x1b[%dD", back))
 		}
 		// Update visual rows for this render (single-line case)
 		lastVisualRows = visualRowsFor(line, ghost)
@@ -231,17 +251,17 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 	clearSuggestionList := func() {
 		if lastTabListRows > 0 {
 			// Move to first overlay line below the prompt
-			os.Stdout.WriteString("\x1b[1B")
+			writeStdout("\x1b[1B")
 			for r := 0; r < lastTabListRows; r++ {
 				// Clear line
-				os.Stdout.WriteString("\r\x1b[2K")
+				writeStdout("\r\x1b[2K")
 				// Move down to next overlay line except after the last one
 				if r < lastTabListRows-1 {
-					os.Stdout.WriteString("\x1b[1B")
+					writeStdout("\x1b[1B")
 				}
 			}
 			// Return cursor to the prompt line
-			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", lastTabListRows))
+			writeStdout(fmt.Sprintf("\x1b[%dA", lastTabListRows))
 			lastTabListRows = 0
 		}
 	}
@@ -278,21 +298,21 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		// If this is the first draw, allocate `rows` new lines so we don't overwrite prior output.
 		if prevRows == 0 {
 			for i := 0; i < rows; i++ {
-				os.Stdout.WriteString("\r\n")
+				writeStdout("\r\n")
 			}
 			// Return cursor to the prompt line
-			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", rows))
+			writeStdout(fmt.Sprintf("\x1b[%dA", rows))
 		} else if rows > prevRows {
 			// Allocate extra lines if the overlay grew
 			delta := rows - prevRows
 			for i := 0; i < delta; i++ {
-				os.Stdout.WriteString("\r\n")
+				writeStdout("\r\n")
 			}
 			// Return cursor to the prompt line
-			os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", delta))
+			writeStdout(fmt.Sprintf("\x1b[%dA", delta))
 		}
 		// Move to first list line; render overlay directly below prompt
-		os.Stdout.WriteString("\x1b[1B")
+		writeStdout("\x1b[1B")
 		// Overwrite max(prevRows, rows) lines
 		total := prevRows
 		if rows > total {
@@ -303,7 +323,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		}
 		for r := 0; r < total; r++ {
 			// Clear line
-			os.Stdout.WriteString("\r\x1b[2K")
+			writeStdout("\r\x1b[2K")
 			if r < rows {
 				// Compose row r
 				for c := 0; c < cols; c++ {
@@ -313,25 +333,25 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 					}
 					s := cands[idx]
 					if idx != selected {
-						os.Stdout.WriteString(ansiGhost)
+						writeStdout(ansiGhost)
 					}
-					os.Stdout.WriteString(s)
+					writeStdout(s)
 					if idx != selected {
-						os.Stdout.WriteString(ansiReset)
+						writeStdout(ansiReset)
 					}
 					if c < cols-1 {
 						if sp := colW - len(s); sp > 0 {
-							os.Stdout.WriteString(strings.Repeat(" ", sp))
+							writeStdout(strings.Repeat(" ", sp))
 						}
 					}
 				}
 			}
 			if r < total-1 {
-				os.Stdout.WriteString("\x1b[1B")
+				writeStdout("\x1b[1B")
 			}
 		}
 		// Move back up to the prompt line
-		os.Stdout.WriteString(fmt.Sprintf("\x1b[%dA", total))
+		writeStdout(fmt.Sprintf("\x1b[%dA", total))
 		return rows
 	}
 
@@ -365,8 +385,8 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 
 	// Enable bracketed paste mode (widely supported) so multiline pastes are bracketed
 	// Start: ESC[200~ , End: ESC[201~
-	os.Stdout.WriteString("\x1b[?2004h")
-	defer os.Stdout.WriteString("\x1b[?2004l")
+	writeStdout("\x1b[?2004h")
+	defer func() { writeStdout("\x1b[?2004l") }()
 
 	// Non-blocking refresh watcher
 	refreshNotify := make(chan struct{}, 1)
@@ -390,7 +410,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				_ = terraform.PatchStateFromConfigLiterals(scratchDir, statePath)
 				// Target only files changed since last scan for non-literals
 				changedFiles := []string{}
-				filepath.Walk(scratchDir, func(p string, info os.FileInfo, err error) error {
+				if err := filepath.Walk(scratchDir, func(p string, info os.FileInfo, err error) error {
 					if err != nil || info.IsDir() {
 						return nil
 					}
@@ -401,7 +421,9 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 						changedFiles = append(changedFiles, p)
 					}
 					return nil
-				})
+				}); err != nil {
+					writeStderr(fmt.Sprintf("walk scratch error: %v", err))
+				}
 				if len(changedFiles) > 0 {
 					// For each changed resource block/attribute, run the exact same targeted logic
 					// by calling the exact attribute patch for type+name+attr
@@ -445,7 +467,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 		// Read up to the buffer size; process sequentially
 		n, err := tty.Read(readKey)
 		if err != nil || n == 0 {
-			os.Stdout.WriteString("\r\n")
+			writeStdout("\r\n")
 			return
 		}
 		i := 0
@@ -600,7 +622,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 						} else {
 							cands, start, end = index.CompletionCandidates(line, byteOffsetOfRuneIndex(line, cursor))
 							if len(cands) == 0 {
-								os.Stdout.WriteString("\a")
+								writeStdout("\a")
 								render()
 								i += 3
 								continue
@@ -668,7 +690,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 			switch b {
 			case 3: // Ctrl+C — behave like Bash: clear current input and show a fresh prompt
 				clearSuggestionList()
-				os.Stdout.WriteString("\r\n")
+				writeStdout("\r\n")
 				// reset TAB cycle and ghost state to avoid stale overlays
 				lastTabCands = nil
 				lastTabIdx = -1
@@ -683,7 +705,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				i++
 				continue
 			case 4: // Ctrl+D
-				os.Stdout.WriteString("\r\n[exit]\r\n")
+				writeStdout("\r\n[exit]\r\n")
 				return
 			case '\r', '\n':
 				// ENTER should always submit; do not accept suggestions or ghosts here.
@@ -691,7 +713,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				line := string(buf)
 				// Clear overlay before printing a new line
 				clearSuggestionList()
-				os.Stdout.WriteString("\r\n")
+				writeStdout("\r\n")
 				normalized := normalizeInputForEval(line)
 				if strings.TrimSpace(normalized) != "" {
 					if normalized == "exit" || normalized == "quit" {
@@ -711,23 +733,23 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 					histIdx = -1
 					stdout, stderr, evalErr := session.Evaluate(normalized, 15*time.Second)
 					if stdout != "" {
-						os.Stdout.WriteString(normalizeTTYNewlines(stdout))
+						writeStdout(normalizeTTYNewlines(stdout))
 						if !strings.HasSuffix(stdout, "\n") && !strings.HasSuffix(stdout, "\r\n") {
-							os.Stdout.WriteString("\r\n")
+							writeStdout("\r\n")
 						}
 					}
 					if stderr != "" {
-						os.Stderr.WriteString(normalizeTTYNewlines(stderr))
+						writeStderr(normalizeTTYNewlines(stderr))
 						if !strings.HasSuffix(stderr, "\n") && !strings.HasSuffix(stderr, "\r\n") {
-							os.Stderr.WriteString("\r\n")
+							writeStderr("\r\n")
 						}
 					}
 					if evalErr != nil {
 						msg := evalErr.Error()
 						if msg != "" {
-							os.Stderr.WriteString(normalizeTTYNewlines(msg))
+							writeStderr(normalizeTTYNewlines(msg))
 							if !strings.HasSuffix(msg, "\n") && !strings.HasSuffix(msg, "\r\n") {
-								os.Stderr.WriteString("\r\n")
+								writeStderr("\r\n")
 							}
 						}
 					}
@@ -766,7 +788,7 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 				line := string(buf)
 				if strings.Contains(line, "\n") {
 					// Disable TAB completion in multiline mode
-					os.Stdout.WriteString("\a")
+					writeStdout("\a")
 					render()
 					i++
 					continue
@@ -825,14 +847,13 @@ func RunREPL(session *terraform.ConsoleSession, index *terraform.SymbolIndex, re
 						clearSuggestionList()
 						suppressGhostUntilInput = true
 						render()
-						i++
 						continue
 					}
 				}
 
 				if !cycleActive && len(cands) == 0 {
 					// No matches; return quickly and silently
-					os.Stdout.WriteString("\a")
+					writeStdout("\a")
 					render()
 					i++
 					continue

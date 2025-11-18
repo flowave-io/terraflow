@@ -26,7 +26,9 @@ func acquireTTY() (*os.File, func(), error) {
 	save.Stdin = tty
 	out, err := save.Output()
 	if err != nil {
-		tty.Close()
+		if cerr := tty.Close(); cerr != nil {
+			fmt.Fprintln(os.Stderr, "close tty after stty -g error:", cerr)
+		}
 		return nil, nil, fmt.Errorf("stty -g failed: %w", err)
 	}
 	state := strings.TrimSpace(string(out))
@@ -39,7 +41,9 @@ func acquireTTY() (*os.File, func(), error) {
 	}
 	raw.Stdin = tty
 	if err := raw.Run(); err != nil {
-		tty.Close()
+		if cerr := tty.Close(); cerr != nil {
+			fmt.Fprintln(os.Stderr, "close tty after stty raw error:", cerr)
+		}
 		return nil, nil, fmt.Errorf("stty raw -echo failed: %w", err)
 	}
 	restore := func() {

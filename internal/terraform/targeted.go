@@ -523,98 +523,6 @@ func computeVarsStamp(varFiles []string) string {
 	return b.String()
 }
 
-// patchAttrValueExact evaluates (if needed) and patches one attribute for a single resource.
-func patchAttrValueExact(workDir, statePath string, varFiles []string, rType, rName, attr string, isLiteral bool, lit any, expr string) error {
-	// Evaluate
-	var val any
-	if isLiteral {
-		val = lit
-	} else if strings.TrimSpace(expr) != "" {
-		if v, ok := TryEvalInProcess(workDir, varFiles, expr, 300*time.Millisecond); ok {
-			val = v
-		} else if v, ok := EvalJSON(workDir, statePath, varFiles, expr, 400*time.Millisecond); ok {
-			val = v
-		}
-	}
-	if val == nil {
-		return nil
-	}
-	// Patch
-	b, err := os.ReadFile(statePath)
-	if err != nil {
-		return err
-	}
-	var st map[string]any
-	if err := json.Unmarshal(b, &st); err != nil {
-		return err
-	}
-	resources, _ := st["resources"].([]any)
-	if resources == nil {
-		resources = []any{}
-	}
-	// find matching type+name in root module
-	for i := range resources {
-		m, ok := resources[i].(map[string]any)
-		if !ok {
-			continue
-		}
-		if mode, _ := m["mode"].(string); mode != "managed" {
-			continue
-		}
-		if t, _ := m["type"].(string); t != rType {
-			continue
-		}
-		if n, _ := m["name"].(string); n != rName {
-			continue
-		}
-		if _, hasProv := m["provider"]; !hasProv {
-			m["provider"] = providerAddressForType(rType)
-		}
-		instRaw, _ := m["instances"].([]any)
-		if len(instRaw) == 0 {
-			m["instances"] = []any{map[string]any{"attributes": map[string]any{attr: sanitizeValue(val)}, "schema_version": 0}}
-			resources[i] = m
-			st["resources"] = resources
-			return writeStateBump(statePath, st, b)
-		}
-		changed := false
-		for j := range instRaw {
-			im, _ := instRaw[j].(map[string]any)
-			if im == nil {
-				continue
-			}
-			attrs, _ := im["attributes"].(map[string]any)
-			if attrs == nil {
-				attrs = map[string]any{}
-				im["attributes"] = attrs
-			}
-			nv := sanitizeValue(val)
-			ov, exists := attrs[attr]
-			if !exists || !deepEqualJSONish(ov, nv) {
-				attrs[attr] = nv
-				changed = true
-			}
-		}
-		if changed {
-			m["instances"] = instRaw
-			resources[i] = m
-			st["resources"] = resources
-			return writeStateBump(statePath, st, b)
-		}
-		return nil
-	}
-	// create new
-	newRes := map[string]any{
-		"mode":      "managed",
-		"type":      rType,
-		"name":      rName,
-		"provider":  providerAddressForType(rType),
-		"instances": []any{map[string]any{"attributes": map[string]any{attr: sanitizeValue(val)}, "schema_version": 0}},
-	}
-	st["resources"] = append(resources, newRes)
-	return writeStateBump(statePath, st, b)
-}
-
 // patchAttrValueExactWithCtx is like patchAttrValueExact but uses a prebuilt HCL eval context.
 var evalMemoMu sync.Mutex
 var evalMemo = map[string]any{}
@@ -835,7 +743,7 @@ func PatchSpecificResourceAttrExact(rootDir, workDir, statePath string, varFiles
 				m["provider"] = providerAddressForType(rType)
 			}
 			instRaw, _ := m["instances"].([]any)
-			if instRaw == nil || len(instRaw) == 0 {
+			if len(instRaw) == 0 {
 				m["instances"] = []any{map[string]any{"attributes": map[string]any{attr: sanitizeValue(val)}, "schema_version": 0}}
 				resources[i] = m
 				st["resources"] = resources
