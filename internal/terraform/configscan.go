@@ -317,12 +317,13 @@ func BuildResourceConfigsEvaluatedGlobal(rootDir, workDir, statePath string, var
 // their literal attributes and string forms of non-literal expressions.
 func collectModuleExpressions(moduleDir string, modulePath []string, out *[]scanResInfo) error {
 	err := filepath.Walk(moduleDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			if info != nil && info.IsDir() {
-				base := filepath.Base(p)
-				if (base == ".terraform" || base == ".terraflow" || strings.HasPrefix(base, ".git")) && p != moduleDir {
-					return filepath.SkipDir
-				}
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			// Avoid descending; module recursion handles child dirs
+			if p != moduleDir {
+				return filepath.SkipDir
 			}
 			return nil
 		}
@@ -417,12 +418,13 @@ func getSyntaxFileCached(path string) ([]byte, *hcl.File, bool) {
 func parseModuleResourcesWithEval(moduleDir string, modulePath []string, workDir, statePath string, varFiles []string, evalCache map[string]any) ([]ResourceConfig, error) {
 	var out []ResourceConfig
 	err := filepath.Walk(moduleDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			if info != nil && info.IsDir() {
-				base := filepath.Base(p)
-				if (base == ".terraform" || base == ".terraflow" || strings.HasPrefix(base, ".git")) && p != moduleDir {
-					return filepath.SkipDir
-				}
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			// Avoid descending; child modules are handled by recursion
+			if p != moduleDir {
+				return filepath.SkipDir
 			}
 			return nil
 		}
@@ -611,13 +613,13 @@ func splitModuleKey(key string) []string {
 func parseModuleResources(moduleDir string, modulePath []string) ([]ResourceConfig, error) {
 	var out []ResourceConfig
 	err := filepath.Walk(moduleDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			if info != nil && info.IsDir() {
-				base := filepath.Base(p)
-				// Skip heavy/internal dirs, but do NOT skip the root moduleDir itself even if its name is ".terraflow"
-				if (base == ".terraform" || base == ".terraflow" || strings.HasPrefix(base, ".git")) && p != moduleDir {
-					return filepath.SkipDir
-				}
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			// Do not descend into subdirectories here; child modules are handled explicitly by the caller
+			if p != moduleDir {
+				return filepath.SkipDir
 			}
 			return nil
 		}
