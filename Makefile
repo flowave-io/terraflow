@@ -6,7 +6,7 @@ build:
 run:
 	go run ./cmd/terraflow
 lint:
-	golangci-lint run
+	golangci-lint run -v ./...
 fmt:
 	go fmt ./...
 vet:
