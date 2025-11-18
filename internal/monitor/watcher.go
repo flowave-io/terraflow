@@ -39,7 +39,7 @@ func WatchTerraformFilesNotifying(dir string, refreshCh chan<- struct{}) {
 
 func pollTerraformFiles(dir string, last map[string]time.Time) bool {
 	changed := false
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}

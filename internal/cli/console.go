@@ -32,7 +32,7 @@ func RunConsoleCommand(args []string) {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.SetOutput(os.Stdout)
 	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), `Usage: terraflow [global options] console [options]
+		if _, err := fmt.Fprint(fs.Output(), `Usage: terraflow [global options] console [options]
 
   Starts an interactive console for experimenting with Terraform
   interpolations.
@@ -56,7 +56,9 @@ Options:
   -var-file=path        Set variables in the Terraform configuration from
                         a file. If "terraform.tfvars" or any ".auto.tfvars"
                         files are present, they will be automatically loaded.
-`)
+`); err != nil {
+			fmt.Fprintln(os.Stderr, "error printing usage:", err)
+		}
 	}
 	// Support multiple -var-file flags similar to Terraform
 	var varFiles multiStringFlag

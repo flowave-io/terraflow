@@ -532,10 +532,8 @@ func parseModuleResourcesWithEval(moduleDir string, modulePath []string, workDir
 						rm = m
 					}
 				}
-				if rm != nil {
-					for k, v := range rm {
-						attrs[k] = v
-					}
+				for k, v := range rm {
+					attrs[k] = v
 				}
 				// Fallback per-attribute eval when missing from batch
 				for k, expr := range ri.exprs {
