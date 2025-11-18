@@ -37,7 +37,7 @@ jobs:
           version: v2.6
 
   unit-tests:
-    name: Tests (${{ matrix.os }})
+    name: Unit Tests
     runs-on: ${{ matrix.os }}
     needs: lint
     strategy:
@@ -59,7 +59,7 @@ jobs:
 
   race-tests:
     if: github.event.pull_request.merged == true || github.event.action == 'released'
-    name: Tests (${{ matrix.os }})
+    name: Race Tests
     runs-on: ${{ matrix.os }}
     needs: lint
     strategy:
