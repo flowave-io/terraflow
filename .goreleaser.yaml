@@ -1,0 +1,85 @@
+version: 2
+
+builds:
+  - binary: terraflow
+    dir: ./cmd/terraflow
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -extldflags "-static"
+    goos:
+      - linux
+      - windows
+      - darwin
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+sboms:
+  - id: default
+    artifacts: source
+
+snapshot:
+  version_template: SNAPSHOT-{{ .Commit }}
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
+  algorithm: sha256
+
+signs:
+  - id: gpg
+    cmd: gpg
+    args:
+      - --batch
+      - --local-user
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - --output
+      - "${signature}"
+      - --detach-sign
+      - "${artifact}"
+    artifacts: checksum
+  - id: cosign
+    signature: "${artifact}.sbom.json.bundle"
+    cmd: cosign
+    args:
+      - sign-blob
+      - --new-bundle-format
+      - --bundle
+      - "${signature}"
+      - "${artifact}"
+    artifacts: checksum
+
+release:
+  prerelease: auto
+  github:
+    owner: flowave-io
+    name: terraflow
+
+announce:
+  discord:
+    enabled: true
+    message_template: |
+      Terraflow {{ .Tag }} is now available!
+      {{ .ReleaseURL }}
+    author: 'terraflow'
+    icon_url: ''

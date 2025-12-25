@@ -36,3 +36,5 @@ bin
 *.tfstate
 *.tfstate.backup
 .terraform.lock.hcl
+# Added by goreleaser init:
+dist/
