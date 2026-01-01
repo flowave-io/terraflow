@@ -9,7 +9,7 @@ import (
 	"github.com/flowave-io/terraflow/internal/terraform"
 )
 
-const version = "0.1.0"
+var version = "0.1.0"
 
 func printHelp() {
 	fmt.Print(`Terraflow is a real-time development solution for Terraform and OpenTofu.

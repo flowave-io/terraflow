@@ -1,32 +1,49 @@
 version: 2
 
+project_name: terraflow
+
 env:
   - COSIGN_YES=true
 
 builds:
-  - binary: terraflow
-    dir: ./cmd/terraflow
+  - id: macos
+    goos: [darwin]
+    goarch: [amd64, arm64]
     env:
       - CGO_ENABLED=0
+    binary: bin/terraflow
+    main: ./cmd/terraflow
     ldflags:
-      - -extldflags "-static"
-    goos:
-      - linux
-      - windows
-      - darwin
+      - -s -w -X main.version={{.Version}}
+
+  - id: linux
+    goos: [linux]
+    goarch: ["386", amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    binary: bin/terraflow
+    main: ./cmd/terraflow
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: windows
+    goos: [windows]
+    goarch: ["386", amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    binary: bin/terraflow
+    main: ./cmd/terraflow
+    ldflags:
+      - -s -w -X main.version={{.Version}}
 
 archives:
-  - formats: [tar.gz]
-    name_template: >-
-      {{ .ProjectName }}_
-      {{- .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
-    format_overrides:
-      - goos: windows
-        formats: [zip]
+  - id: nix
+    ids: [macos, linux]
+    wrap_in_directory: false
+
+  - id: windows
+    ids: [windows]
+    formats: zip
 
 sboms:
   - id: default
@@ -41,9 +58,9 @@ changelog:
     exclude:
       - "^docs:"
       - "^test:"
-      - '^chore:'
-      - Merge pull request
-      - Merge branch
+      - "^chore:"
+      - "^Merge pull request"
+      - "^Merge branch"
 
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
