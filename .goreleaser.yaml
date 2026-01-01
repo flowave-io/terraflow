@@ -39,11 +39,12 @@ builds:
 archives:
   - id: nix
     ids: [macos, linux]
-    wrap_in_directory: false
+    wrap_in_directory: true
 
   - id: windows
     ids: [windows]
     formats: zip
+    wrap_in_directory: true
 
 sboms:
   - id: default
