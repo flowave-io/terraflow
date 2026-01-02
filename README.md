@@ -38,7 +38,7 @@ You edit code, Terraflow reflects the changes.
 
 ### Basic Usage
 
-Run this command in any directory containing Terraform (`.tf`) files to start the interactive console.
+Run the following command in the Terraform project directory to start the interactive console.
 
 ```sh
 $ terraflow console
