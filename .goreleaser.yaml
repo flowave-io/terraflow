@@ -54,14 +54,8 @@ snapshot:
   version_template: SNAPSHOT-{{ .Commit }}
 
 changelog:
+  use: github-native
   sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
-      - "^Merge pull request"
-      - "^Merge branch"
 
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"

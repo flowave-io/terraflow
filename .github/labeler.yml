@@ -1,0 +1,14 @@
+enhancement:
+  - head-branch: ['^feat', 'feat', '^feature', 'feature']
+
+bug:
+  - head-branch: ['^fix', 'fix', "bug", "bugfix"]
+
+documentation:
+  - head-branch: [ '^docs' ]
+
+maintenance:
+  - head-branch: [ '^chore' ]
+
+ci:
+  - head-branch: [ '^ci' ]
