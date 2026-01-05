@@ -1,6 +1,7 @@
 name: Bug Report
 description: Please inform us of any unexpected errors, or an incorrect behaviour.
 labels: ["bug", "new"]
+type: bug
 body:
   - type: markdown
     attributes:
@@ -37,19 +38,6 @@ body:
       required: true
 
   - type: textarea
-    id: tf-config
-    attributes:
-      label: Terraform Configuration Files
-      description: Share the Terraform configuration that Terraflow is watching when the bug appears.
-      placeholder:
-      value: |
-        ```terraform
-        # Your Terraform configuration here
-        ```
-    validations:
-      required: true
-
-  - type: textarea
     id: tfl-expected
     attributes:
       label: Expected Behavior
@@ -82,6 +70,19 @@ body:
       value:
     validations:
       required: true
+
+  - type: textarea
+    id: tf-config
+    attributes:
+      label: Terraform Configuration Files
+      description: Share the Terraform configuration that Terraflow is watching when the bug appears.
+      placeholder:
+      value: |
+        ```terraform
+        # Your Terraform configuration here
+        ```
+    validations:
+      required: false
 
   - type: textarea
     id: tfl-add-context
